@@ -16,8 +16,10 @@ import os
 import warnings
 
 # Thermoengine modules
+import thermoengine
 from thermoengine import equilibrate 
 from thermoengine import model
+
 
 # Local modules
 from data.databases.janaf_data_importer_gef import janaf_data_importer
@@ -55,11 +57,13 @@ class melt_vapor_system:
 
         fname_ml_values = 'mass_law_values.csv'
         dname_ml_values = 'data/'
+        self.ml_values = pd.read_csv(dname_ml_values+fname_ml_values).set_index('species')
         
         # Importing thermo data
         self.thermo_data = janaf_data_importer() # janaf data
         self.thermo_data.update(barin_data_importer()) # barin data
 
+        print('thermodynamic data which should be a dictionary:',self.thermo_data)
         # FastChem 
         ######################################################################
         ## This needs to be changed depending on where FastChem is located! ##
@@ -162,108 +166,56 @@ class melt_vapor_system:
             T = np.array([T])
         
         # Calculate thermodynamic values
-        self.melt_comp = self.melt.set_melt_comp(melt_comp,verbose)        
+        #self.melt_comp = self.melt.set_melt_comp(melt_comp,verbose)
+        #self.melt.melts = thermoengine.magmaforge.System(comp=self.melt_comp, P_bar=P_melt, T_K=T, database=self.melt.modelDB)
+        #print('thermodchemical data: ',self.thermo_data)       
+        #self.melt.calculate_melt_chemical_potentials(T,P_melt,self.thermo_data)
+        #self.melt.calculate_melt_activities(T,P_melt)            
+        #self.logKr = self.logKr_calc(T,self.melt.mu0_liquid)
+    
+        self.melt.melts = thermoengine.magmaforge.System(comp=self.melt_comp, P_bar=P_melt, T_K=T[0], database=self.melt.modelDB)  
+        self.melt_comp = self.melt.set_melt_comp(melt_comp,verbose)    
         self.melt.calculate_melt_chemical_potentials(T,P_melt,self.thermo_data)
         self.melt.calculate_melt_activities(T,P_melt)            
         self.logKr = self.logKr_calc(T,self.melt.mu0_liquid)
-    
-        
 
-        with tqdm(total=len(T), file=sys.stdout) as pbar: 
-            for i,t in enumerate(T):
+
                 
-                #find initial O2 partial pressure before outgassing -> intheory we actually know this from calliope, so sould also use that output instead
-                #not sure if this approach works - maybe I need to instead find the overall O-inventory
+        #find initial O2 partial pressure before outgassing -> intheory we actually know this from calliope, so sould also use that output instead
+        #not sure if this approach works - maybe I need to instead find the overall O-inventory
 
 
-                fO2_tries = 10**self.fO2_interp_func(t)*np.array([1e-7,1e-5,1e-3,1e-2,1e-1,1e0,1e1,1e2,1e4,1e6])
-                lb=np.log10(min(fO2_tries))
-                ub=np.log10(max(fO2_tries))
+        fO2_tries = 10**self.fO2_interp_func(t)*np.array([1e-7,1e-5,1e-3,1e-2,1e-1,1e0,1e1,1e2,1e4,1e6])
+        lb=np.log10(min(fO2_tries))
+        ub=np.log10(max(fO2_tries))
 
-                print(lb,ub)
+        print(lb,ub)
 
-                from scipy.optimize import minimize_scalar
+        from scipy.optimize import minimize_scalar
 
                 # tHis now computes mass balance with new abundances accounting for previously present oxygen 
-                def mass_balance(logfO2):
-                    fO2 = 10.0**logfO2
-                    return abs(self.mass_balance_equation_fastchem(fO2,[t], volatile_comp))
+        def mass_balance(logfO2):
+            fO2 = 10.0**logfO2
+            return abs(self.mass_balance_equation_fastchem(fO2,T, volatile_comp))
 
-                res = minimize_scalar(mass_balance, bounds=(lb, ub), method="bounded",tol = 1e-6)
+        res = minimize_scalar(mass_balance, bounds=(lb, ub), method="bounded",tol = 1e-6)
 
-                fO2_best = 10**res.x
-                print('best fO2',fO2_best)
-                print('Results opt:',res)
+        fO2_best = 10**res.x
+        print('best fO2',fO2_best)
+        print('Results opt:',res)
 
-                #subtract previouly available oxygen from oxygen that will be outgassed.
-                fO2_outgassed = fO2_best  #maybe better from mass balance
+        #subtract previouly available oxygen from oxygen that will be outgassed.
+        fO2_outgassed = fO2_best  #maybe better from mass balance
 
-                vapor_partial_pressures = self.vapor_partial_pressure_calc(fO2_outgassed, [t])
-                P_outgassed = vapor_partial_pressures.sum(axis=1).iloc[0]+fO2_outgassed
-                P_boa = P_outgassed + self.P_volatile
-                partial_pressures = self.calculate_partial_pressures_fastchem_loop([self.O_abun],[t],[P_boa],vapor_partial_pressures,volatile_comp,meltfrac=melt_fraction)
+        vapor_partial_pressures = self.vapor_partial_pressure_calc(fO2_outgassed, T)
+        P_outgassed = vapor_partial_pressures.sum(axis=1).iloc[0]+fO2_outgassed
+        P_boa = P_outgassed + self.P_volatile
+        partial_pressures = self.calculate_partial_pressures_fastchem_loop([self.O_abun],T,[P_boa],vapor_partial_pressures,volatile_comp,meltfrac=melt_fraction)
                 
-                #print(partial_pressures['SiO2'],partial_pressures['SiO'])
                 
 
         return partial_pressures
-    
-    
-    
 
-
-    def mb_output(self, fO2_array, T, P_volatile, melt_comp, volatile_comp, P_melt = 0.01,\
-                          fO2_initial_guess = 1e-10,\
-                          verbose = True):
-
-        self.P_volatile = P_volatile
-
-        # Ensures that T is iterable even if just one value is given
-        if type(T) != np.ndarray:
-            T = np.array([T])
-        
-        # Calculate thermodynamic values
-        self.melt_comp = self.melt.set_melt_comp(melt_comp,verbose)        
-        self.melt.calculate_melt_chemical_potentials(T,P_melt,self.thermo_data)
-        self.melt.calculate_melt_activities(T,P_melt)            
-        self.logKr = self.logKr_calc(T,self.melt.mu0_liquid)
-        
-
-        mb = np.zeros(len(fO2_array))     
-        pps = {}
-
-        for i,fO2 in enumerate(fO2_array):
-            print('\nfO2',fO2)
-            # mb[i], pps[fO2] = self.mass_balance_equation_fastchem_altered(np.array([fO2]),T,volatile_comp)
-            mb[i] = self.mass_balance_equation_fastchem(np.array([fO2]),T,volatile_comp)
-
-        return mb, pps
-
-    def fastchem_debug(self, fO2_array, T, P_volatile, melt_comp, volatile_comp, P_melt = 0.01,\
-                          fO2_initial_guess = 1e-10,\
-                          verbose = True):
-
-        self.P_volatile = P_volatile
-
-        # Ensures that T is iterable even if just one value is given
-        if type(T) != np.ndarray:
-            T = np.array([T])
-        
-        # Calculate thermodynamic values
-        self.melt_comp = self.melt.set_melt_comp(melt_comp,verbose)        
-        self.melt.calculate_melt_chemical_potentials(T,P_melt,self.thermo_data)
-        self.melt.calculate_melt_activities(T,P_melt)            
-        self.logKr = self.logKr_calc(T,self.melt.mu0_liquid)
-        
-
-        mb = np.zeros(len(fO2_array))     
-        # pps = {}
-
-        for i,fO2 in enumerate(fO2_array):
-
-            mb[i] = self.mass_balance_equation_fastchem(np.array([fO2]),T,volatile_comp)
-
-        return mb
 
 
     def get_massbalance_init(self,partial_pressures):
@@ -862,9 +814,16 @@ class MeltState:
         self.a = None
         
         # Initialising thermoengine classes
-        self.melts = equilibrate.MELTSmodel(melts_version)
-        modelDB = model.Database(liq_mod='v1.0')
-        self.liq_phs = modelDB.get_phase('Liq')
+        #self.melts = equilibrate.MELTSmodel(melts_version)
+        phs_sys='Liq'
+        elm_sys = ['Si', 'Mg', 'Fe', 'Al', 'Ca', 'Na', 'K', 'Ti', 'Cr', 'O']
+        thermoengine.model.Database.DATABASE_DATA_DIR=os.path.dirname(thermoengine.__file__)+"/../../phase_library/databases/"
+        self.modelDB = model.Database(database_name="MELTS_v1_0")
+        self.liq_phs = self.modelDB.get_phase('Liq')
+
+        #melts = thermoengine.equilibrate.Equilibrate(elm_sys,phs_sys)
+        #melts = equil.execute(T, P, bulk_comp=blk_cmp, debug=debug, stats=stats)
+
         self.endmember_names = self.liq_phs.endmember_names
         self.nonendmember_oxide_names = ['MgO','FeO','CaO','Na2O',\
                                          'K2O','Cr2O3']
@@ -902,7 +861,7 @@ class MeltState:
 
         # Set dictionary labels to oxides allowed by melts
         melt_comp = {} # dict([(ox,0) for ox in self.liq_phs.OXIDES])
-
+        print('input composition:',input_comp)
         for species in input_comp:
 
             if species not in self.liq_phs.OXIDES: # Check validity of input
@@ -916,9 +875,9 @@ class MeltState:
                       + f' (yet) included in vaporisation calculations.')
             
         # Set melt comp in thermoengine class
-        self.melts.set_bulk_composition(melt_comp)
-        if verbose:
-            print(f'Melt composition set to: {melt_comp}')
+        #self.melts.set_bulk_composition(melt_comp)
+        #if verbose:
+            #print(f'Melt composition set to: {melt_comp}')
 
         # Save included oxides
         self.included_oxides = {}
@@ -927,7 +886,7 @@ class MeltState:
                 self.included_oxides[ox] = False
             else:
                 self.included_oxides[ox] = True
-
+        self.comp=melt_comp
         return melt_comp
     
     
@@ -956,12 +915,13 @@ class MeltState:
                                   for imol in np.eye(15)])
         self.mu0_liquid = pd.DataFrame(mu0_endmember,\
                                 index=self.liq_phs.endmember_names,columns=T).T
-
-
+        
         for oxide in self.nonendmember_oxide_names:
             # Try to interpolate, if outside range of database uses linear fit 
             # of last four data points to extrapolate to higher temperatures. 
-
+            phase=thermo_data[oxide+'(l)']
+            print(type(phase))
+            print(dir(phase))
             max_temp = thermo_data[oxide+'(l)'].T.iloc[-1]
             T_interp = T[T<=max_temp]
             T_extrap = T[T>max_temp]
@@ -996,6 +956,7 @@ class MeltState:
         # Calculates endmember activities using MELTS function
         for t in T:
             # Calculate excess chemical potential
+            #self.melts = thermoengine.magmaforge.System(comp=self.comp, P_bar=P_melt, T_K=t, database=self.modelDB)
             output = self.melts.equilibrate_tp(t,P_melt,initialize=True)
             status,t,p,xmlout = output[0]
             excs_dict = self.melts.get_thermo_properties_of_phase_components(xmlout,\

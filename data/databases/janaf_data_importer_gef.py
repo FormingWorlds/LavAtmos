@@ -1,3 +1,5 @@
+import sys
+sys.path.append('/data3/leoni/PROTEUS/LavAtmos/')
 from data.databases.janaf.janaf import Janafdb
 
 
