@@ -67,19 +67,45 @@ class JanafPhase(object):
         self.rawdata_text = rawdata_text
 
         self.description = self.rawdata_text.splitlines()[0]
-        print('data:',self.description)
+        print(self.description)
+
+        clean_lines = []
+
+        for line in self.rawdata_text.splitlines():
+            parts = line.split()
+
+            # Keep only rows whose first 8 entries are numeric
+            try:
+                if len(parts) >= 8:
+                    [float(x) for x in parts[:8]]
+                    clean_lines.append(" ".join(parts[:8]))
+            except ValueError:
+                pass
+
+        data = pd.read_csv(
+            StringIO("\n".join(clean_lines)),
+            sep=r"\s+",
+            header=None,
+            names=[
+                'T', 'Cp', 'S', '[G-H(Tr)]/T',
+                'H-H(Tr)', 'Delta_fH', 'Delta_fG', 'log(Kf)'
+            ]
+        )
+
 
         # Read the text file into a DataFrame.
-        data = pd.read_csv(
-            StringIO(self.rawdata_text),
-            skiprows=2,
-            header=None,
-            delimiter=r'[\t\s]+',
-            engine='python',
-            names=['T', 'Cp', 'S', '[G-H(Tr)]/T', 'H-H(Tr)', 'Delta_fH', 'Delta_fG', 'log(Kf)'],
-            usecols=range(8) # Ignore extra columns -- those are caused by comments in the text file
-        )
+        #data = pd.read_csv(
+            #StringIO(self.rawdata_text),
+            #skiprows=4,
+            #header=None,
+            #delimiter=r'[\t\s]+',
+            #engine='python',
+            #names=['T', 'Cp', 'S', '[G-H(Tr)]/T', 'H-H(Tr)', 'Delta_fH', 'Delta_fG', 'log(Kf)'],
+            #usecols=range(8) # Ignore extra columns -- those are caused by comments in the text file
+        #)
         self.rawdata = data
+
+        #print(data)
 
         # Sometimes the JANAF files have funky stuff written in them.
         # (Old school text format...)

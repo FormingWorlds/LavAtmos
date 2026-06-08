@@ -18,12 +18,12 @@ import warnings
 # Thermoengine modules
 import thermoengine
 from thermoengine import equilibrate 
-from thermoengine import model
+from thermoengine import model,core
 
 
 # Local modules
-from data.databases.janaf_data_importer_gef import janaf_data_importer
-from data.databases.barin_data_importer_gef import barin_data_importer
+from data2.databases.janaf_data_importer_gef import janaf_data_importer
+from data2.databases.barin_data_importer_gef import barin_data_importer
 #from library.cacher import CachedResults
 
 class melt_vapor_system:
@@ -44,6 +44,7 @@ class melt_vapor_system:
 
         # Points used as a smart start for fO2
         t_dep_points = {}
+        t_dep_points = {}
         t_dep_points['T'] = [2000,2500,3000,3500,4000]
         t_dep_points['fO2'] = np.log10([1e-16,1e-11,1e-5,1e-2,1e0])
         #t_dep_points['fO2'] = np.log10([1e-18,1e-13,1e-7,1e-4,1e-2])
@@ -52,16 +53,16 @@ class melt_vapor_system:
         
         # Importing stoichiometries for reactions
         fname_cdef_values = 'cdef_values_vapor_reactions_2.csv'
-        dname_cdef_values = 'data/'
+        dname_cdef_values = '/data3/leoni/PROTEUS/LavAtmos/data2/'
         self.cdef = pd.read_csv(dname_cdef_values+fname_cdef_values).set_index('vapor')
 
         fname_ml_values = 'mass_law_values.csv'
-        dname_ml_values = 'data/'
+        dname_ml_values = '/data3/leoni/PROTEUS/LavAtmos/data2/'
         self.ml_values = pd.read_csv(dname_ml_values+fname_ml_values).set_index('species')
         
         # Importing thermo data
         self.thermo_data = janaf_data_importer() # janaf data
-        self.thermo_data.update(barin_data_importer()) # barin data
+        self.thermo_data.update(barin_data_importer())
 
         print('thermodynamic data which should be a dictionary:',self.thermo_data)
         # FastChem 
@@ -173,8 +174,7 @@ class melt_vapor_system:
         #self.melt.calculate_melt_activities(T,P_melt)            
         #self.logKr = self.logKr_calc(T,self.melt.mu0_liquid)
     
-        self.melt.melts = thermoengine.magmaforge.System(comp=self.melt_comp, P_bar=P_melt, T_K=T[0], database=self.melt.modelDB)  
-        self.melt_comp = self.melt.set_melt_comp(melt_comp,verbose)    
+        self.melt_comp = self.melt.set_melt_comp(melt_comp,verbose) 
         self.melt.calculate_melt_chemical_potentials(T,P_melt,self.thermo_data)
         self.melt.calculate_melt_activities(T,P_melt)            
         self.logKr = self.logKr_calc(T,self.melt.mu0_liquid)
@@ -185,7 +185,7 @@ class melt_vapor_system:
         #not sure if this approach works - maybe I need to instead find the overall O-inventory
 
 
-        fO2_tries = 10**self.fO2_interp_func(t)*np.array([1e-7,1e-5,1e-3,1e-2,1e-1,1e0,1e1,1e2,1e4,1e6])
+        fO2_tries = 10**self.fO2_interp_func(T[0])*np.array([1e-7,1e-5,1e-3,1e-2,1e-1,1e0,1e1,1e2,1e4,1e6])
         lb=np.log10(min(fO2_tries))
         ub=np.log10(max(fO2_tries))
 
@@ -815,13 +815,14 @@ class MeltState:
         
         # Initialising thermoengine classes
         #self.melts = equilibrate.MELTSmodel(melts_version)
-        phs_sys='Liq'
-        elm_sys = ['Si', 'Mg', 'Fe', 'Al', 'Ca', 'Na', 'K', 'Ti', 'Cr', 'O']
+        self.elm_sys = ['H','O','Na','Mg','Al','Si','P','K','Ca','Ti','Cr','Mn','Fe','Co','Ni']
         thermoengine.model.Database.DATABASE_DATA_DIR=os.path.dirname(thermoengine.__file__)+"/../../phase_library/databases/"
         self.modelDB = model.Database(database_name="MELTS_v1_0")
         self.liq_phs = self.modelDB.get_phase('Liq')
+        self.phs_sys= self.modelDB.get_phases(['Liq'])
 
-        #melts = thermoengine.equilibrate.Equilibrate(elm_sys,phs_sys)
+        self.equil = thermoengine.equilibrate.Equilibrate(self.elm_sys,self.phs_sys)
+        print(self.equil)
         #melts = equil.execute(T, P, bulk_comp=blk_cmp, debug=debug, stats=stats)
 
         self.endmember_names = self.liq_phs.endmember_names
@@ -953,13 +954,34 @@ class MeltState:
             done.                
         '''
         a = {}
+        mantle_comp=self.comp
+        #print(mantle_comp)
+        self.mol_oxides = core.chem.format_mol_oxide_comp(mantle_comp,convert_grams_to_moles=True)
+        #print(self.mol_oxides)
+        self.moles_end,self.oxide_res= self.liq_phs.calc_endmember_comp(mol_oxide_comp=self.mol_oxides, method='intrinsic', output_residual=True)
+        print(self.moles_end,self.oxide_res)
+        if not self.liq_phs.test_endmember_comp(self.moles_end):
+            print ("Calculated composition is infeasible!")
+        self.mol_elm = self.liq_phs.convert_endmember_comp(self.moles_end,output='moles_elements')
+        blk_cmp = []
+        for elm in self.elm_sys: 
+            index = core.chem.PERIODIC_ORDER.tolist().index(elm)
+            blk_cmp.append(self.mol_elm[index]) 
+        self.blk_cmp = np.array(blk_cmp)
+        print(self.blk_cmp)
+        print(self.mol_elm)
         # Calculates endmember activities using MELTS function
         for t in T:
             # Calculate excess chemical potential
             #self.melts = thermoengine.magmaforge.System(comp=self.comp, P_bar=P_melt, T_K=t, database=self.modelDB)
-            output = self.melts.equilibrate_tp(t,P_melt,initialize=True)
+            #output = self.melts.equilibrate_.Equilibrate(t,P_melt,initialize=True
+
+
+
+            output=self.equil.execute(t,P_melt,bulk_comp=self.blk_cmp)
+
             status,t,p,xmlout = output[0]
-            excs_dict = self.melts.get_thermo_properties_of_phase_components(xmlout,\
+            excs_dict = self.equil.get_thermo_properties_of_phase_components(xmlout,\
                                 'Liquid',mode='excess')
             included_endmembers = list(excs_dict.keys())
             excs = list(excs_dict.values())            
