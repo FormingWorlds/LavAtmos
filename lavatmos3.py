@@ -64,7 +64,6 @@ class melt_vapor_system:
         self.thermo_data = janaf_data_importer() # janaf data
         self.thermo_data.update(barin_data_importer())
 
-        print('thermodynamic data which should be a dictionary:',self.thermo_data)
         # FastChem 
         ######################################################################
         ## This needs to be changed depending on where FastChem is located! ##
@@ -72,16 +71,17 @@ class melt_vapor_system:
         ######################################################################
 
         # Try FC from os.environ
-        if 'FC_DIR' in os.environ:
-            self.fastchem_dir = os.environ['FC_DIR']
-            self.abundances_location = os.environ['FC_DIR'] + 'input/element_abundances/'
+        #if 'FC_DIR' in os.environ:
+            #self.fastchem_dir = os.environ['FC_DIR']
+            #self.abundances_location = os.environ['FC_DIR'] + 'input/element_abundances/'
 
-        else:
+        #else:
             # For if LavAtmos2 is being run as part of the BigPipe
-            self.fastchem_dir = paths.fastchem3_dir
-            self.abundances_location = paths.element_abundances3
-        self.fastchem_column_names = ['Pbar','Tk','n_<tot>','n_g','mu']
-
+        self.fastchem_dir = paths.fastchem3_dir
+        print(self.fastchem_dir)
+        self.abundances_location = paths.element_abundances3
+        #self.fastchem_column_names = ['Pbar','Tk','n_<tot>','n_g','mu']
+        self.fastchem_column_names = ['#p(bar)','T(K)','n_<tot>(cm-3)','n_g(cm-3)','m(u)']
         # For if LavAtmos2 is standalone
         # self.fastchem_dir = 'FastChem/' 
         # self.abundances_location = self.fastchem_dir+'input/element_abundances/' 
@@ -166,13 +166,6 @@ class melt_vapor_system:
         if type(T) != np.ndarray:
             T = np.array([T])
         
-        # Calculate thermodynamic values
-        #self.melt_comp = self.melt.set_melt_comp(melt_comp,verbose)
-        #self.melt.melts = thermoengine.magmaforge.System(comp=self.melt_comp, P_bar=P_melt, T_K=T, database=self.melt.modelDB)
-        #print('thermodchemical data: ',self.thermo_data)       
-        #self.melt.calculate_melt_chemical_potentials(T,P_melt,self.thermo_data)
-        #self.melt.calculate_melt_activities(T,P_melt)            
-        #self.logKr = self.logKr_calc(T,self.melt.mu0_liquid)
     
         self.melt_comp = self.melt.set_melt_comp(melt_comp,verbose) 
         self.melt.calculate_melt_chemical_potentials(T,P_melt,self.thermo_data)
@@ -198,7 +191,7 @@ class melt_vapor_system:
             fO2 = 10.0**logfO2
             return abs(self.mass_balance_equation_fastchem(fO2,T, volatile_comp))
 
-        res = minimize_scalar(mass_balance, bounds=(lb, ub), method="bounded",tol = 1e-6)
+        res = minimize_scalar(mass_balance, bounds=(lb, ub), method="bounded",options={"xatol": 1e-6})
 
         fO2_best = 10**res.x
         print('best fO2',fO2_best)
@@ -289,6 +282,9 @@ class melt_vapor_system:
 
         P_outgassed = vapor_partial_pressures.sum(axis=1).iloc[0]+fO2
         P_boa = [P_outgassed + self.P_volatile]
+
+        print('P_outgassed', P_outgassed)
+        print('vapor_partial_pressures', vapor_partial_pressures)
         #self.inner_loop_output = 1e20
 
         if 'O' in volatile_comp:
@@ -309,7 +305,7 @@ class melt_vapor_system:
         objective,
         bounds=(-12, 12),
         method="bounded",
-        tol = 1e-6
+        options={"xatol": 1e-6}
         )
 
         self.O_abun = 10**res.x #thi sis now the extra O abundance that is required to reproduce the PO2 guessed
@@ -394,6 +390,7 @@ class melt_vapor_system:
         dfO2 = (fO2-fO2_output)/fO2
         
         self.inner_loop_output = dfO2
+        print('inner loop output', self.inner_loop_output)
 
         return dfO2
 
@@ -408,6 +405,7 @@ class melt_vapor_system:
         self.run_fastchem()
 
         fastchem_partial_pressures = self.read_fastchem_partial_pressures()
+        #print('fastchem partial pressures', fastchem_partial_pressures)
 
         return fastchem_partial_pressures
 
@@ -426,7 +424,7 @@ class melt_vapor_system:
             O_abun = O_abun[0]
 
         frac = {}
-        
+
         if vapor_partial_pressures is not None:
         
             for el in self.vaporised_elements:
@@ -454,7 +452,7 @@ class melt_vapor_system:
         #budget for O comes from interior and atmosphere not only atmosphere so need to cinser all sources for fastchem
         for vol in volatile_comp.keys(): #these are CHNOPS
             if P_boa==0:
-                    print('warning, surfac epressure of volatiles is zero !!!')
+                    print('warning, surface pressure of volatiles is zero !!!')
                     frac[vol] = 0.0
             else:
                 if vol == 'O':
@@ -462,7 +460,9 @@ class melt_vapor_system:
                     frac[vol] += O_abun
                     #print(vol, volatile_comp[vol], self.P_volatile)
                 else:
+                    print('calculating fastchem abundance for', vol)
                     frac[vol] = self.P_volatile*volatile_comp[vol]/P_boa
+                    print(frac[vol])
 
 
 
@@ -545,8 +545,14 @@ class melt_vapor_system:
             
             # Importing names and values from cdef file
             endmember = self.cdef.iloc[i]['endmember']
-            liq_oxide1 = self.cdef.iloc[i]['liq_oxide1'].replace('(l)','')
-            liq_oxide2 = self.cdef.iloc[i]['liq_oxide2'].replace('(l)','')
+            if pd.notna(self.cdef.iloc[i]['liq_oxide1']) :
+                liq_oxide1 = self.cdef.iloc[i]['liq_oxide1'].replace('(l)','')
+            else:
+                liq_oxide1 = 'None'
+            if pd.notna(self.cdef.iloc[i]['liq_oxide2']) :
+                liq_oxide2 = self.cdef.iloc[i]['liq_oxide2'].replace('(l)','')
+            else:
+                liq_oxide2 = 'None'
             ci = self.cdef.iloc[i]['ci']
             di = self.cdef.iloc[i]['di']
             ei = self.cdef.iloc[i]['ei'] 
@@ -641,11 +647,16 @@ class melt_vapor_system:
             
             #Calculate gibbs energy of a vapor for a given T
             vapor = self.cdef.index[i]
-            
             # Importing names and values from cdef file
             endmember = self.cdef.iloc[i]['endmember']
-            liq_oxide1 = self.cdef.iloc[i]['liq_oxide1'].replace('(l)','')
-            liq_oxide2 = self.cdef.iloc[i]['liq_oxide2'].replace('(l)','')
+            if pd.notna(self.cdef.iloc[i]['liq_oxide1']) :
+                liq_oxide1 = self.cdef.iloc[i]['liq_oxide1'].replace('(l)','')
+            else:
+                liq_oxide1 = 'None'
+            if pd.notna(self.cdef.iloc[i]['liq_oxide2']) :
+                liq_oxide2 = self.cdef.iloc[i]['liq_oxide2'].replace('(l)','')
+            else:
+                liq_oxide2 = 'None'
             ci = self.cdef.iloc[i]['ci']
             di = self.cdef.iloc[i]['di']
             ei = self.cdef.iloc[i]['ei'] 
@@ -700,9 +711,9 @@ class melt_vapor_system:
         # print(T,P)
         # print(f'Running FastChem for single point at T: {T[0]} [K] and P: {P[0]:.3e} [bar]')
          # Open parameter template file
-        tp_point_path = 'input/tp_point.dat' 
+        tp_point_path = self.fastchem_dir+'/input/tp_point.dat' 
         #tp_file = open(self.fastchem_dir+tp_point_path, 'w')
-        tp_file = open('fastchem3/'+tp_point_path, 'w')
+        tp_file = open(tp_point_path, 'w')
         tp_file.write(f'P\tT\n{P[0]:.6e}\t{T[0]:.6e}')
         tp_file.close()
 
@@ -710,25 +721,30 @@ class melt_vapor_system:
         Editing config file
         '''
         # print('\nEditing FastChem config')
-        config_path = self.fastchem_dir+'input/config.input'
+       
+        config_path = self.fastchem_dir+'/input/config.input'
         param_path = self.fastchem_dir+'input/parameters.dat'
 
         # Config file
-        template_path_config = self.fastchem_dir+'input/config_template.input'
+        print(self.fastchem_dir)
+        template_path_config = self.fastchem_dir+'/input/config_template.input'
 
         # Open parameter template file
         template = open(template_path_config)
         configurations = template.read()
         template.close()
 
-        #print(self.abundance_fname.replace('FastChem/',''))
-
         fastchem_config = {
             'param_path' : param_path,
             'tp_grid_path' : tp_point_path, 
-            'output_abundance_fname' : 'output/boa_chem.dat',
-            'element_abundance_file' : self.abundance_fname.replace('FastChem/','')
+            'output_abundance_fname' : self.fastchem_dir +'/output/boa_chem.dat',
+            'output_condensate_fname' : self.fastchem_dir +'/output/condensates.dat',
+            'output_monitor_fname' : self.fastchem_dir +'/output/monitor.dat',
+            'element_abundance_file' : self.abundance_fname.replace('FastChem/',''),
+            'species_data_file' : self.fastchem_dir + '/input/logK/logK.dat',
+            'species_data_file_cond' : self.fastchem_dir + '/input/logK/logK_condensates.dat'
             }
+        
         for config in fastchem_config:
             configurations = configurations.replace(f'<<{config}>>', fastchem_config[config])
 
@@ -767,18 +783,19 @@ class melt_vapor_system:
 
 
     def run_fastchem(self):
-        # Check call instead of call can catch the error 
+        # Check call instead of call can catch the error if FastChem cannot run properly, e.g. if it is not compiled.
+
         try: 
-            subprocess.check_call([f'./fastchem input/config.input'],\
+            subprocess.check_call([f'./fastchem {self.fastchem_dir}/input/config.input'],\
                                   shell=True,\
-                                  cwd=f'{self.fastchem_dir}/',stdout=subprocess.DEVNULL) 
+                                  cwd=f'{self.fastchem_dir}/',stdout=subprocess.DEVNULL)
         except: 
             print(f'\nFastChem cannot run properly.')
             print(f'Try compile it by running make under {self.fastchem_dir}\n'); raise 
 
     def read_fastchem_partial_pressures(self):
 
-        fname = self.fastchem_dir+'output/boa_chem.dat'
+        fname = self.fastchem_dir+'/output/boa_chem.dat'
         fastchem_partial_pressures = pd.read_csv(fname, sep=r'\s+')
         return fastchem_partial_pressures.drop(columns=self.fastchem_column_names)\
                *fastchem_partial_pressures[self.fastchem_column_names[0]].iloc[0]
@@ -822,7 +839,6 @@ class MeltState:
         self.phs_sys= self.modelDB.get_phases(['Liq'])
 
         self.equil = thermoengine.equilibrate.Equilibrate(self.elm_sys,self.phs_sys)
-        print(self.equil)
         #melts = equil.execute(T, P, bulk_comp=blk_cmp, debug=debug, stats=stats)
 
         self.endmember_names = self.liq_phs.endmember_names
@@ -914,15 +930,15 @@ class MeltState:
         # Calculates endmember chemical potentials using MELTS function
         mu0_endmember = np.array([self.liq_phs.gibbs_energy(T,P_melt,mol=imol)\
                                   for imol in np.eye(15)])
+
         self.mu0_liquid = pd.DataFrame(mu0_endmember,\
                                 index=self.liq_phs.endmember_names,columns=T).T
-        
         for oxide in self.nonendmember_oxide_names:
             # Try to interpolate, if outside range of database uses linear fit 
             # of last four data points to extrapolate to higher temperatures. 
             phase=thermo_data[oxide+'(l)']
-            print(type(phase))
-            print(dir(phase))
+            #print(type(phase))
+            #print(dir(phase))
             max_temp = thermo_data[oxide+'(l)'].T.iloc[-1]
             T_interp = T[T<=max_temp]
             T_extrap = T[T>max_temp]
@@ -959,7 +975,7 @@ class MeltState:
         self.mol_oxides = core.chem.format_mol_oxide_comp(mantle_comp,convert_grams_to_moles=True)
         #print(self.mol_oxides)
         self.moles_end,self.oxide_res= self.liq_phs.calc_endmember_comp(mol_oxide_comp=self.mol_oxides, method='intrinsic', output_residual=True)
-        print(self.moles_end,self.oxide_res)
+        #print(self.moles_end,self.oxide_res)
         if not self.liq_phs.test_endmember_comp(self.moles_end):
             print ("Calculated composition is infeasible!")
         self.mol_elm = self.liq_phs.convert_endmember_comp(self.moles_end,output='moles_elements')
@@ -968,25 +984,26 @@ class MeltState:
             index = core.chem.PERIODIC_ORDER.tolist().index(elm)
             blk_cmp.append(self.mol_elm[index]) 
         self.blk_cmp = np.array(blk_cmp)
-        print(self.blk_cmp)
-        print(self.mol_elm)
+        R = 8.31446261815324
         # Calculates endmember activities using MELTS function
         for t in T:
             # Calculate excess chemical potential
-            #self.melts = thermoengine.magmaforge.System(comp=self.comp, P_bar=P_melt, T_K=t, database=self.modelDB)
-            #output = self.melts.equilibrate_.Equilibrate(t,P_melt,initialize=True
 
+            state=self.equil.execute(t,P_melt,bulk_comp=self.blk_cmp)
 
+            #getting activities:
+            #a_i = exp((μ_i - μ_i°) / RT)
 
-            output=self.equil.execute(t,P_melt,bulk_comp=self.blk_cmp)
+            liq = state.phase_d['Liquid']
+            phase = state.phase_d['Liquid']['obj']
+            mol=np.array(state.phase_d['Liquid']['moles']) #mol shoudl be teh composition of the liquid in terms of mol fraction of teh endmembers
+            end_array = np.identity(phase.endmember_num)
+            chem_pots = self.liq_phs.chem_potential(t, P_melt, mol=mol) #loops over imol in mole to get mu of each species corresponding to each endmember 
+            chem_pots_endms = np.zeros(phase.endmember_num)
+            for i in range(phase.endmember_num):
+                chem_pots_endms[i] = self.liq_phs.gibbs_energy(t, P_melt, mol=end_array[i,:])
 
-            status,t,p,xmlout = output[0]
-            excs_dict = self.equil.get_thermo_properties_of_phase_components(xmlout,\
-                                'Liquid',mode='excess')
-            included_endmembers = list(excs_dict.keys())
-            excs = list(excs_dict.values())            
-            
-            # Convert to activity
-            a[t] = np.exp(excs/(self._R*t))
-        
-        self.a = pd.DataFrame(a,index=included_endmembers).T
+            a[t] = np.exp((chem_pots-chem_pots_endms)/ R / t)
+           
+        print('activities saved:',pd.DataFrame(a,index=self.liq_phs.endmember_names).T)
+        self.a = pd.DataFrame(a,index=self.liq_phs.endmember_names).T

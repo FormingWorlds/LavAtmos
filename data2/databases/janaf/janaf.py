@@ -67,7 +67,6 @@ class JanafPhase(object):
         self.rawdata_text = rawdata_text
 
         self.description = self.rawdata_text.splitlines()[0]
-        print(self.description)
 
         clean_lines = []
 
@@ -104,8 +103,6 @@ class JanafPhase(object):
             #usecols=range(8) # Ignore extra columns -- those are caused by comments in the text file
         #)
         self.rawdata = data
-
-        #print(data)
 
         # Sometimes the JANAF files have funky stuff written in them.
         # (Old school text format...)
