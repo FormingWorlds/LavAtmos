@@ -78,10 +78,14 @@ class melt_vapor_system:
         #else:
             # For if LavAtmos2 is being run as part of the BigPipe
         self.fastchem_dir = paths.fastchem3_dir
-        print(self.fastchem_dir)
-        self.abundances_location = paths.element_abundances3
+        self.fastchem_output=paths.fastchem3_output
+        #self.abundances_location = paths.element_abundances3
         #self.fastchem_column_names = ['Pbar','Tk','n_<tot>','n_g','mu']
         self.fastchem_column_names = ['#p(bar)','T(K)','n_<tot>(cm-3)','n_g(cm-3)','m(u)']
+        #self.fastchem_column_names = ['Pbar','Tk','n_<tot>','n_g','mu']
+        self.elementfile = paths.element_abundance_output
+        self.abundances_template = paths.element_abundance_template
+        #self.lavadir = '/data3/leoni/PROTEUS/LavAtmos/' #this is needed for the location of the logK files for fastchem, but also needs to be changed depending on where LavAtmos is located.
         # For if LavAtmos2 is standalone
         # self.fastchem_dir = 'FastChem/' 
         # self.abundances_location = self.fastchem_dir+'input/element_abundances/' 
@@ -154,12 +158,11 @@ class melt_vapor_system:
                         'Zn' : 4.56
                         }
 
-    def vaporise(self, T, P_volatile, melt_comp, volatile_comp ,elementfile ,melt_fraction=1.0 , P_melt = 0.01,\
+    def vaporise(self, T, P_volatile, melt_comp, volatile_comp ,melt_fraction=1.0 , P_melt = 0.01,\
                           fO2_initial_guess = 1e-10,\
                           verbose = True):
 
         self.P_volatile = P_volatile
-        self.elementfile = elementfile #where lavatmos stores the output element abundances 
 
 
         # Ensures that T is iterable even if just one value is given
@@ -168,6 +171,7 @@ class melt_vapor_system:
         
     
         self.melt_comp = self.melt.set_melt_comp(melt_comp,verbose) 
+        print('melt composition:', self.melt_comp)
         self.melt.calculate_melt_chemical_potentials(T,P_melt,self.thermo_data)
         self.melt.calculate_melt_activities(T,P_melt)            
         self.logKr = self.logKr_calc(T,self.melt.mu0_liquid)
@@ -204,7 +208,6 @@ class melt_vapor_system:
         P_outgassed = vapor_partial_pressures.sum(axis=1).iloc[0]+fO2_outgassed
         P_boa = P_outgassed + self.P_volatile
         partial_pressures = self.calculate_partial_pressures_fastchem_loop([self.O_abun],T,[P_boa],vapor_partial_pressures,volatile_comp,meltfrac=melt_fraction)
-                
                 
 
         return partial_pressures
@@ -282,9 +285,6 @@ class melt_vapor_system:
 
         P_outgassed = vapor_partial_pressures.sum(axis=1).iloc[0]+fO2
         P_boa = [P_outgassed + self.P_volatile]
-
-        print('P_outgassed', P_outgassed)
-        print('vapor_partial_pressures', vapor_partial_pressures)
         #self.inner_loop_output = 1e20
 
         if 'O' in volatile_comp:
@@ -460,9 +460,9 @@ class melt_vapor_system:
                     frac[vol] += O_abun
                     #print(vol, volatile_comp[vol], self.P_volatile)
                 else:
-                    print('calculating fastchem abundance for', vol)
+                    ##print('calculating fastchem abundance for', vol)
                     frac[vol] = self.P_volatile*volatile_comp[vol]/P_boa
-                    print(frac[vol])
+                    #print(frac[vol])
 
 
 
@@ -491,12 +491,9 @@ class melt_vapor_system:
 
         # Open abundance file template
         # TODO: Consider not hardcoding this (moving to paths file)
-        template_name = 'element_abundances_template2.dat'
-        #template_name = 'element_abundances_noe-.dat'
-        output_name = self.elementfile
-        solar_abund_name = 'element_abundances_solar.dat'
+    
 
-        template = open(self.abundances_location+template_name, 'r')
+        template = open(self.abundances_template, 'r')
         elab_file = template.read()
         template.close()
 
@@ -522,7 +519,7 @@ class melt_vapor_system:
                 elab_file = elab_file.replace(f'<<{el}>>', str(abund))
         
         # Save abundance file
-        self.abundance_fname = self.abundances_location+output_name
+        self.abundance_fname = self.elementfile
         
         g = open(self.abundance_fname, 'w')
         g.write(elab_file)
@@ -726,29 +723,32 @@ class melt_vapor_system:
         param_path = self.fastchem_dir+'input/parameters.dat'
 
         # Config file
-        print(self.fastchem_dir)
+        #print(self.fastchem_dir)
         template_path_config = self.fastchem_dir+'/input/config_template.input'
 
-        # Open parameter template file
+        # Open parameter template fileself.fastchem_dir + 'input/logK/logK.dat'
         template = open(template_path_config)
         configurations = template.read()
         template.close()
 
+
         fastchem_config = {
             'param_path' : param_path,
             'tp_grid_path' : tp_point_path, 
-            'output_abundance_fname' : self.fastchem_dir +'/output/boa_chem.dat',
-            'output_condensate_fname' : self.fastchem_dir +'/output/condensates.dat',
-            'output_monitor_fname' : self.fastchem_dir +'/output/monitor.dat',
+            'output_abundance_fname' : self.fastchem_output +'boa_chem.dat',
+            'output_condensate_fname' : self.fastchem_output +'condensates.dat',
+            'output_monitor_fname' : self.fastchem_output +'monitor.dat',
             'element_abundance_file' : self.abundance_fname.replace('FastChem/',''),
             'species_data_file' : self.fastchem_dir + '/input/logK/logK.dat',
             'species_data_file_cond' : self.fastchem_dir + '/input/logK/logK_condensates.dat'
+            #'species_data_file' : '/data3/leoni/LavAtmos/FastChem/fastchem3/input/logK/logK.dat',
+            #'species_data_file_cond' : '/data3/leoni/LavAtmos/FastChem/fastchem3/input/logK/logK_condensates.dat',
             }
         
         for config in fastchem_config:
             configurations = configurations.replace(f'<<{config}>>', fastchem_config[config])
 
-        # Save config file
+
         config_file = open(config_path, 'w')
         config_file.write(configurations)
         config_file.close()
@@ -795,7 +795,7 @@ class melt_vapor_system:
 
     def read_fastchem_partial_pressures(self):
 
-        fname = self.fastchem_dir+'/output/boa_chem.dat'
+        fname = self.fastchem_output+'boa_chem.dat'
         fastchem_partial_pressures = pd.read_csv(fname, sep=r'\s+')
         return fastchem_partial_pressures.drop(columns=self.fastchem_column_names)\
                *fastchem_partial_pressures[self.fastchem_column_names[0]].iloc[0]
@@ -878,7 +878,7 @@ class MeltState:
 
         # Set dictionary labels to oxides allowed by melts
         melt_comp = {} # dict([(ox,0) for ox in self.liq_phs.OXIDES])
-        print('input composition:',input_comp)
+        #   print('input composition:',input_comp)
         for species in input_comp:
 
             if species not in self.liq_phs.OXIDES: # Check validity of input
@@ -904,6 +904,7 @@ class MeltState:
             else:
                 self.included_oxides[ox] = True
         self.comp=melt_comp
+        #print(melt_comp)
         return melt_comp
     
     
@@ -930,9 +931,11 @@ class MeltState:
         # Calculates endmember chemical potentials using MELTS function
         mu0_endmember = np.array([self.liq_phs.gibbs_energy(T,P_melt,mol=imol)\
                                   for imol in np.eye(15)])
+        #print(mu0_endmember.shape)
+        #print(np.shape(T))
+        #print(pd.DataFrame(mu0_endmember,index=self.liq_phs.endmember_names,columns=T))
+        self.mu0_liquid = pd.DataFrame(mu0_endmember,index=self.liq_phs.endmember_names,columns=T).T
 
-        self.mu0_liquid = pd.DataFrame(mu0_endmember,\
-                                index=self.liq_phs.endmember_names,columns=T).T
         for oxide in self.nonendmember_oxide_names:
             # Try to interpolate, if outside range of database uses linear fit 
             # of last four data points to extrapolate to higher temperatures. 
@@ -987,9 +990,10 @@ class MeltState:
         R = 8.31446261815324
         # Calculates endmember activities using MELTS function
         for t in T:
+            temp=float(t)
             # Calculate excess chemical potential
 
-            state=self.equil.execute(t,P_melt,bulk_comp=self.blk_cmp)
+            state=self.equil.execute(temp,P_melt,bulk_comp=self.blk_cmp)
 
             #getting activities:
             #a_i = exp((μ_i - μ_i°) / RT)
@@ -998,12 +1002,12 @@ class MeltState:
             phase = state.phase_d['Liquid']['obj']
             mol=np.array(state.phase_d['Liquid']['moles']) #mol shoudl be teh composition of the liquid in terms of mol fraction of teh endmembers
             end_array = np.identity(phase.endmember_num)
-            chem_pots = self.liq_phs.chem_potential(t, P_melt, mol=mol) #loops over imol in mole to get mu of each species corresponding to each endmember 
+            chem_pots = self.liq_phs.chem_potential(temp, P_melt, mol=mol) #loops over imol in mole to get mu of each species corresponding to each endmember 
             chem_pots_endms = np.zeros(phase.endmember_num)
             for i in range(phase.endmember_num):
-                chem_pots_endms[i] = self.liq_phs.gibbs_energy(t, P_melt, mol=end_array[i,:])
+                chem_pots_endms[i] = self.liq_phs.gibbs_energy(temp, P_melt, mol=end_array[i,:])
 
-            a[t] = np.exp((chem_pots-chem_pots_endms)/ R / t)
+            a[temp] = np.exp((chem_pots-chem_pots_endms)/ R / temp)
            
-        print('activities saved:',pd.DataFrame(a,index=self.liq_phs.endmember_names).T)
+        #print('activities saved:',pd.DataFrame(a,index=self.liq_phs.endmember_names).T)
         self.a = pd.DataFrame(a,index=self.liq_phs.endmember_names).T
