@@ -85,6 +85,7 @@ class melt_vapor_system:
         self.fastchem_column_names = ['#p(bar)','T(K)','n_<tot>(cm-3)','n_g(cm-3)','m(u)']
         #self.fastchem_column_names = ['Pbar','Tk','n_<tot>','n_g','mu']
         self.elementfile = paths.element_abundance_output
+        print('elementfile at ',self.elementfile)
         self.abundances_template = paths.element_abundance_template
         self.species_data_file = paths.species_data_file
         self.species_data_file_cond = paths.species_data_file_cond
@@ -161,7 +162,7 @@ class melt_vapor_system:
 
     def vaporise(self, T, P_volatile, melt_comp, volatile_comp ,melt_fraction=1.0 , P_melt = 0.01,\
                           fO2_initial_guess = 1e-10,\
-                          verbose = True, paths=None):
+                          verbose = True):
 
         self.P_volatile = P_volatile
 
@@ -497,6 +498,7 @@ class melt_vapor_system:
         template = open(self.abundances_template, 'r')
         elab_file = template.read()
         template.close()
+        print(template)
 
         #all refractory element abundances are wero if no outgassing yet
         if vapor_partial_pressures is None:
@@ -521,10 +523,10 @@ class melt_vapor_system:
         
         # Save abundance file
         self.abundance_fname = self.elementfile
-        
         g = open(self.abundance_fname, 'w')
         g.write(elab_file)
         g.close()
+        print('Saved abundance file to', self.abundance_fname)
 
         return P_boa
 
