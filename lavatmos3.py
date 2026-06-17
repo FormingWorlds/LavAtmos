@@ -2,6 +2,8 @@
 #this is useful for future runs and needs to be implemented in the main code
 
 # Standard modules
+from logging import log
+
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
@@ -22,8 +24,8 @@ from thermoengine import model,core
 
 
 # Local modules
-from data2.databases.janaf_data_importer_gef import janaf_data_importer
-from data2.databases.barin_data_importer_gef import barin_data_importer
+from data.databases.janaf_data_importer_gef import janaf_data_importer
+from data.databases.barin_data_importer_gef import barin_data_importer
 #from library.cacher import CachedResults
 
 class melt_vapor_system:
@@ -53,11 +55,12 @@ class melt_vapor_system:
         
         # Importing stoichiometries for reactions
         fname_cdef_values = 'cdef_values_vapor_reactions_2.csv'
-        dname_cdef_values = '/data3/leoni/PROTEUS/LavAtmos/data2/'
+        dname_cdef_values = paths.lavatmos_dir + '/data/'
         self.cdef = pd.read_csv(dname_cdef_values+fname_cdef_values).set_index('vapor')
 
         fname_ml_values = 'mass_law_values.csv'
-        dname_ml_values = '/data3/leoni/PROTEUS/LavAtmos/data2/'
+        #dname_ml_values = '/data3/leoni/PROTEUS/LavAtmos/data/'
+        dname_ml_values = paths.lavatmos_dir + '/data/'
         self.ml_values = pd.read_csv(dname_ml_values+fname_ml_values).set_index('species')
         
         # Importing thermo data
@@ -79,21 +82,19 @@ class melt_vapor_system:
             # For if LavAtmos2 is being run as part of the BigPipe
         self.fastchem_dir = paths.fastchem3_dir
         self.fastchem_output=paths.fastchem3_output
-        #self.abundances_location = paths.element_abundances3
-        #self.fastchem_column_names = ['Pbar','Tk','n_<tot>','n_g','mu']
         self.fastchem_column_names = ['#p(bar)','T(K)','n_<tot>(cm-3)','n_g(cm-3)','m(u)']
         #self.fastchem_column_names = ['Pbar','Tk','n_<tot>','n_g','mu']
         self.elementfile = paths.element_abundance_output
         self.abundances_template = paths.element_abundance_template
-        #self.lavadir = '/data3/leoni/PROTEUS/LavAtmos/' #this is needed for the location of the logK files for fastchem, but also needs to be changed depending on where LavAtmos is located.
-        # For if LavAtmos2 is standalone
-        # self.fastchem_dir = 'FastChem/' 
-        # self.abundances_location = self.fastchem_dir+'input/element_abundances/' 
+        self.species_data_file = paths.species_data_file
+        self.species_data_file_cond = paths.species_data_file_cond
+        self.config_template = paths.fastchem3_config_template
+        self.lavatmos_dir=paths.lavatmos_dir
 
         #######################################################################
 
         # Initialise states
-        self.melt = MeltState()
+        self.melt = MeltState(paths)
         
         # Allowed input oxides
         self.oxides = ['SiO2','MgO','Al2O3','FeO','CaO','Na2O','K2O','TiO2','Fe2O3']
@@ -160,7 +161,7 @@ class melt_vapor_system:
 
     def vaporise(self, T, P_volatile, melt_comp, volatile_comp ,melt_fraction=1.0 , P_melt = 0.01,\
                           fO2_initial_guess = 1e-10,\
-                          verbose = True):
+                          verbose = True, paths=None):
 
         self.P_volatile = P_volatile
 
@@ -171,7 +172,7 @@ class melt_vapor_system:
         
     
         self.melt_comp = self.melt.set_melt_comp(melt_comp,verbose) 
-        print('melt composition:', self.melt_comp)
+        #print('melt composition:', self.melt_comp)
         self.melt.calculate_melt_chemical_potentials(T,P_melt,self.thermo_data)
         self.melt.calculate_melt_activities(T,P_melt)            
         self.logKr = self.logKr_calc(T,self.melt.mu0_liquid)
@@ -724,14 +725,13 @@ class melt_vapor_system:
 
         # Config file
         #print(self.fastchem_dir)
-        template_path_config = self.fastchem_dir+'/input/config_template.input'
+        template_path_config = self.config_template
 
         # Open parameter template fileself.fastchem_dir + 'input/logK/logK.dat'
         template = open(template_path_config)
         configurations = template.read()
         template.close()
-
-
+        
         fastchem_config = {
             'param_path' : param_path,
             'tp_grid_path' : tp_point_path, 
@@ -739,8 +739,8 @@ class melt_vapor_system:
             'output_condensate_fname' : self.fastchem_output +'condensates.dat',
             'output_monitor_fname' : self.fastchem_output +'monitor.dat',
             'element_abundance_file' : self.abundance_fname.replace('FastChem/',''),
-            'species_data_file' : self.fastchem_dir + '/input/logK/logK.dat',
-            'species_data_file_cond' : self.fastchem_dir + '/input/logK/logK_condensates.dat'
+            'species_data_file' : self.species_data_file ,
+            'species_data_file_cond' : self.species_data_file_cond
             #'species_data_file' : '/data3/leoni/LavAtmos/FastChem/fastchem3/input/logK/logK.dat',
             #'species_data_file_cond' : '/data3/leoni/LavAtmos/FastChem/fastchem3/input/logK/logK_condensates.dat',
             }
@@ -821,7 +821,7 @@ class MeltState:
     
     '''
 
-    def __init__(self,melts_version='1.0.2'): 
+    def __init__(self,paths=None,melts_version='1.0.2'): 
 
         # Constants
         self._R = 8.314 # Gas constant
@@ -846,8 +846,12 @@ class MeltState:
                                          'K2O','Cr2O3']
 
         # Importing data for liquid reactions
+        self.lavatmos_dir = paths.lavatmos_dir
         fname_cdef_liq_values = 'cdef_values_liquid_reactions.csv'
-        dname_cdef_liq_values = '/data3/leoni/LavAtmos/ThermoEngine/LavAtmos/data/'        
+        if paths.lavatmos_dir is None:
+            dname_cdef_liq_values = '/data3/leoni/LavAtmos/ThermoEngine/LavAtmos/data/'
+        else:
+           dname_cdef_liq_values =  self.lavatmos_dir  + '/data/'    
         self.cdef_liq = pd.read_csv(dname_cdef_liq_values\
                                 + fname_cdef_liq_values).set_index('liq_oxide')
         

@@ -115,7 +115,5 @@ def janaf_data_importer():
     janaf_data['CrO(g)'] = db.getphasedata(formula='CrO',phase='g')
     janaf_data['CrO2(g)'] = db.getphasedata(formula='CrO2',phase='g')
     janaf_data['CrO3(g)'] = db.getphasedata(formula='CrO3',phase='g')
-
-    print(janaf_data['TiO(g)'])
     
     return janaf_data
