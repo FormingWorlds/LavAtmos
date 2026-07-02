@@ -85,7 +85,6 @@ class melt_vapor_system:
         self.fastchem_column_names = ['#p(bar)','T(K)','n_<tot>(cm-3)','n_g(cm-3)','m(u)']
         #self.fastchem_column_names = ['Pbar','Tk','n_<tot>','n_g','mu']
         self.elementfile = paths.element_abundance_output
-        print('elementfile at ',self.elementfile)
         self.abundances_template = paths.element_abundance_template
         self.species_data_file = paths.species_data_file
         self.species_data_file_cond = paths.species_data_file_cond
@@ -498,7 +497,6 @@ class melt_vapor_system:
         template = open(self.abundances_template, 'r')
         elab_file = template.read()
         template.close()
-        print(template)
 
         #all refractory element abundances are wero if no outgassing yet
         if vapor_partial_pressures is None:
@@ -526,7 +524,6 @@ class melt_vapor_system:
         g = open(self.abundance_fname, 'w')
         g.write(elab_file)
         g.close()
-        print('Saved abundance file to', self.abundance_fname)
 
         return P_boa
 
@@ -711,19 +708,40 @@ class melt_vapor_system:
         # print(T,P)
         # print(f'Running FastChem for single point at T: {T[0]} [K] and P: {P[0]:.3e} [bar]')
          # Open parameter template file
-        tp_point_path = self.fastchem_dir+'/input/tp_point.dat' 
+        
+        #tp_point_path = self.fastchem_dir+'input/tp_point.dat' 
         #tp_file = open(self.fastchem_dir+tp_point_path, 'w')
-        tp_file = open(tp_point_path, 'w')
-        tp_file.write(f'P\tT\n{P[0]:.6e}\t{T[0]:.6e}')
-        tp_file.close()
+
 
         '''
-        Editing config file
+        Editing TP point
+        '''
+
+
+        template_path_tp = self.lavatmos_dir + 'input/fastchem3/tp_point_template.dat'
+
+        # Open parameter template fileself.fastchem_dir + 'input/logK/logK.dat'
+        template_tp = open(template_path_tp)
+        tp_config = template_tp.read()
+        template_tp.close()
+
+
+        tp_config = tp_config.replace(f'<<P>>', f'{P[0]:.6e}')
+        tp_config = tp_config.replace(f'<<T>>', f'{T[0]:.6e}')
+    
+        tp_point_path = self.fastchem_output +'tp_point.dat' 
+        tp_config_file = open(tp_point_path, 'w')
+        tp_config_file.write(tp_config)
+        tp_config_file.close()
+
+
+        '''
+        Editing fastchem input config file
         '''
         # print('\nEditing FastChem config')
        
-        config_path = self.fastchem_dir+'/input/config.input'
-        param_path = self.fastchem_dir+'input/parameters.dat'
+        config_path = self.fastchem_output+'config.input'
+        param_path = self.fastchem_output+'parameters.dat'
 
         # Config file
         #print(self.fastchem_dir)
@@ -733,7 +751,7 @@ class melt_vapor_system:
         template = open(template_path_config)
         configurations = template.read()
         template.close()
-        
+
         fastchem_config = {
             'param_path' : param_path,
             'tp_grid_path' : tp_point_path, 
@@ -788,9 +806,10 @@ class melt_vapor_system:
         # Check call instead of call can catch the error if FastChem cannot run properly, e.g. if it is not compiled.
 
         try: 
-            subprocess.check_call([f'./fastchem {self.fastchem_dir}/input/config.input'],\
-                                  shell=True,\
-                                  cwd=f'{self.fastchem_dir}/',stdout=subprocess.DEVNULL)
+            subprocess.check_call([f'./fastchem {self.fastchem_output}config.input'],\
+                                shell=True,\
+                                cwd=f'{self.fastchem_dir}',stdout=subprocess.DEVNULL)
+            #subprocess.check_call(['./fastchem', 'input/config.input'],cwd=self.fastchem_dir,stdout=subprocess.DEVNULL)
         except: 
             print(f'\nFastChem cannot run properly.')
             print(f'Try compile it by running make under {self.fastchem_dir}\n'); raise 
