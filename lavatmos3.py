@@ -155,7 +155,7 @@ class melt_vapor_system:
                         }
 
     def vaporise(self, T, P_volatile, melt_comp, volatile_comp ,melt_fraction=1.0 , P_melt = 0.01,\
-                          fO2_initial_guess = 1e-10,\
+                          fO2_initial_guess = 1e-10,xatol=1e-6,\
                           verbose = True):
 
         self.P_volatile = P_volatile
@@ -178,6 +178,7 @@ class melt_vapor_system:
 
 
         fO2_tries = 10**self.fO2_interp_func(T[0])*np.array([1e-7,1e-5,1e-3,1e-2,1e-1,1e0,1e1,1e2,1e4,1e6])
+        fO2_tries = np.append([fO2_initial_guess], fO2_tries)
         lb=np.log10(min(fO2_tries))
         ub=np.log10(max(fO2_tries))
 
@@ -186,9 +187,9 @@ class melt_vapor_system:
                 # tHis now computes mass balance with new abundances accounting for previously present oxygen 
         def mass_balance(logfO2):
             fO2 = 10.0**logfO2
-            return abs(self.mass_balance_equation_fastchem(fO2,T, volatile_comp))
+            return abs(self.mass_balance_equation_fastchem(fO2,T, volatile_comp,xatol=xatol))
 
-        res = minimize_scalar(mass_balance, bounds=(lb, ub), method="bounded",options={"xatol": 1e-6})
+        res = minimize_scalar(mass_balance, bounds=(lb, ub), method="bounded",options={"xatol": xatol})
 
         fO2_best = 10**res.x
         log.debug(f'LavAtmos best fO2: {fO2_best:.2e} bar')
@@ -247,7 +248,7 @@ class melt_vapor_system:
     
 
 
-    def mass_balance_equation_fastchem(self,fO2,T, volatile_comp):
+    def mass_balance_equation_fastchem(self,fO2,T, volatile_comp,xatol=1e-6):
 
         '''
         Equation that needs to be solved for fO2.
@@ -292,7 +293,7 @@ class melt_vapor_system:
         objective,
         bounds=(-12, 12),
         method="bounded",
-        options={"xatol": 1e-6}
+        options={"xatol": xatol}
         )
 
         self.O_abun = 10**res.x #thi sis now the extra O abundance that is required to reproduce the PO2 guessed
