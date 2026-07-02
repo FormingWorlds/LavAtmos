@@ -1,21 +1,16 @@
 #this module of lavamos 3 has added elementfile as input option such that one can pick which elementfile to pick as output abundances
 #this is useful for future runs and needs to be implemented in the main code
 
-# Standard modules
-from logging import log
+from __future__ import annotations
+import logging
+
+log = logging.getLogger('fwl.' + __name__)
 
 import numpy as np
 import pandas as pd
-from tqdm import tqdm
-from scipy import optimize
-from scipy.optimize import brentq
 from scipy.interpolate import interp1d
-from copy import copy
-import collections
-import sys
 import subprocess
 import os
-import warnings
 
 # Thermoengine modules
 import thermoengine
@@ -172,7 +167,6 @@ class melt_vapor_system:
         
     
         self.melt_comp = self.melt.set_melt_comp(melt_comp,verbose) 
-        #print('melt composition:', self.melt_comp)
         self.melt.calculate_melt_chemical_potentials(T,P_melt,self.thermo_data)
         self.melt.calculate_melt_activities(T,P_melt)            
         self.logKr = self.logKr_calc(T,self.melt.mu0_liquid)
@@ -187,8 +181,6 @@ class melt_vapor_system:
         lb=np.log10(min(fO2_tries))
         ub=np.log10(max(fO2_tries))
 
-        print(lb,ub)
-
         from scipy.optimize import minimize_scalar
 
                 # tHis now computes mass balance with new abundances accounting for previously present oxygen 
@@ -199,8 +191,8 @@ class melt_vapor_system:
         res = minimize_scalar(mass_balance, bounds=(lb, ub), method="bounded",options={"xatol": 1e-6})
 
         fO2_best = 10**res.x
-        print('best fO2',fO2_best)
-        print('Results opt:',res)
+        log.debug(f'LavAtmos best fO2: {fO2_best:.2e} bar')
+        log.debug(f'LavAtmos optimization results: {res}')
 
         #subtract previouly available oxygen from oxygen that will be outgassed.
         fO2_outgassed = fO2_best  #maybe better from mass balance
@@ -221,7 +213,6 @@ class melt_vapor_system:
             self.mass_balance_init=0.0
 
         for gas in partial_pressures.columns:
-        # print('\nGas:',gas)
             contrib = 0
             
             for el in self.mass_law_contribution:
@@ -240,8 +231,6 @@ class melt_vapor_system:
                     
                     # Ensures inclusion of sinle elements at end of species
                     elif index + len(el) == len(gas):
-                        # print('END CHECK')
-                        # print(index + len(el), '=', len(gas))
                         stoi = 1 
 
                     # Avoid counting Si as S
@@ -250,8 +239,6 @@ class melt_vapor_system:
             
                     else: 
                         stoi = 0
-
-                    # print(stoi,'*',self.mass_law_contribution[el])
 
                     contrib += self.mass_law_contribution[el]*stoi
             self.mass_balance_init += contrib*partial_pressures[gas].iloc[0]
@@ -277,7 +264,6 @@ class melt_vapor_system:
         '''
         
         if fO2 < 0:
-            # print('fO2 less than 0! punished',fO2)
             return 1e20
 
         # Partial pressures
@@ -291,9 +277,9 @@ class melt_vapor_system:
         if 'O' in volatile_comp:
             pp_init = self.calculate_partial_pressures_fastchem_loop([0.0],T,[self.P_volatile],vapor_partial_pressures=None,volatile_comp=volatile_comp,meltfrac=1.0)
             self.mass_balance_init = self.get_massbalance_init(pp_init)
-            print('initial mass balance:', self.mass_balance_init)
+            log.debug('LavAtmos initial mass balance:' + str(self.mass_balance_init))
         else:
-            print('no initial mass balance guess, no oxygen in atmosphere')
+            log.debug('LavAtmos no initial mass balance guess, no oxygen in atmosphere')
 
         from scipy.optimize import minimize_scalar,fsolve
 
@@ -311,7 +297,7 @@ class melt_vapor_system:
 
         self.O_abun = 10**res.x #thi sis now the extra O abundance that is required to reproduce the PO2 guessed
         #self.O_abun = 10**logO_sol
-        print('Best O-abundances',self.O_abun)
+        log.debug('Best O-abundances'+str(self.O_abun))
         partial_pressures = self.calculate_partial_pressures_fastchem_loop(self.O_abun,T,P_boa,vapor_partial_pressures,volatile_comp,meltfrac=1.0)
 
         # Calculate mass balance eq.
@@ -323,9 +309,7 @@ class melt_vapor_system:
             retgas[index+1]
 
 
-        # print('\n  MASS BALANCE')#, mass_balance_eq)
         for gas in partial_pressures.columns:
-            # print('\nGas:',gas)
             contrib = 0
             
             for el in self.mass_law_contribution:
@@ -339,16 +323,12 @@ class melt_vapor_system:
 
                     index = gas.find(el)
 
-                    # print('el',el,'in',gas)
-
                     # Check if there's a coefficient present
                     if index + len(el) < len(gas) and gas[index + len(el)].isdigit():
                         stoi = float(gas[index + len(el)])
                     
                     # Ensures inclusion of sinle elements at end of species
                     elif index + len(el) == len(gas):
-                        # print('END CHECK')
-                        # print(index + len(el), '=', len(gas))
                         stoi = 1 
 
                     # Avoid counting Si as S
@@ -358,22 +338,19 @@ class melt_vapor_system:
                     else: 
                         stoi = 0
 
-                    # print(stoi,'*',self.mass_law_contribution[el])
-
                     contrib += self.mass_law_contribution[el]*stoi
 
             self.mass_balance_eq += contrib*partial_pressures[gas].iloc[0]
 
         
-        print('Tried fO2:', fO2)
-        print('\n')
+        log.debug(f'LavAtmos tried fO2: {fO2:.2e} bar')
 
         if 'O' in volatile_comp:
             self.total_mass_balance = self.mass_balance_init - self.mass_balance_eq
-            print('MASS BALANCE EQ with initial oxygen budget :',self.total_mass_balance)
+            log.debug(f'LavAtmos mass balance eq with initial oxygen budget: {self.total_mass_balance:.2e}')
             return self.total_mass_balance
         else:
-            print('MASS BALANCE EQ:',self.mass_balance_eq)
+            log.debug(f'LavAtmos mass balance eq: {self.mass_balance_eq:.2e}')
             return self.mass_balance_eq
 
 
@@ -382,7 +359,6 @@ class melt_vapor_system:
     def inner_loop(self,O_abun,T,fO2,P_boa,vapor_partial_pressures,volatile_comp, meltfrac=1.0):
 
         if O_abun < 0:
-            # print('O2_abun less than 0! punished',O2_abun)
             return 1e20
 
         fastchem_partial_pressures = self.calculate_partial_pressures_fastchem_loop(O_abun,T,P_boa,vapor_partial_pressures, volatile_comp, meltfrac)
@@ -391,7 +367,7 @@ class melt_vapor_system:
         dfO2 = (fO2-fO2_output)/fO2
         
         self.inner_loop_output = dfO2
-        print('inner loop output', self.inner_loop_output)
+        log.debug(f'LavAtmos fO2 residual: {self.inner_loop_output:+.2e}')
 
         return dfO2
 
@@ -406,17 +382,12 @@ class melt_vapor_system:
         self.run_fastchem()
 
         fastchem_partial_pressures = self.read_fastchem_partial_pressures()
-        #print('fastchem partial pressures', fastchem_partial_pressures)
 
         return fastchem_partial_pressures
 
 
     def calculate_fastchem_abundance(self, O_abun, vapor_partial_pressures, P_boa,\
                                      volatile_comp, meltfrac=1.0, final_output=False):
-
-        # print('DEBUUUUUGGG!!!!!!!!!!!')
-        # print(vapor_partial_pressures)
-        # print(P_boa)
 
         if self.is_iterable(P_boa):
             P_boa = P_boa[0]
@@ -434,47 +405,34 @@ class melt_vapor_system:
                 mole_fractions = vapor_partial_pressures/P_boa
 
             for i,spec in enumerate(self.cdef.index):
-                # print(spec)
                 for el in self.vaporised_elements:
 
                     if (el+'3') in spec:
                         frac[el] += 3*mole_fractions[i].iloc[0]
-                        # print(f'{spec}, 3*{el}, ')
 
                     elif (el+'2') in spec:
                         frac[el] += 2*mole_fractions[i].iloc[0]
-                        # print(f'{spec}, 2*{el}, ')
 
                     elif (el) in spec:
                         frac[el] += mole_fractions[i].iloc[0]
-                        # print(f'{spec}, 1*{el}, ')
-                # print(frac)
 
         #budget for O comes from interior and atmosphere not only atmosphere so need to cinser all sources for fastchem
         for vol in volatile_comp.keys(): #these are CHNOPS
             if P_boa==0:
-                    print('warning, surface pressure of volatiles is zero !!!')
+                    log.warning('Surface pressure of volatiles is zero !!!')
                     frac[vol] = 0.0
             else:
                 if vol == 'O':
                     frac[vol] = self.P_volatile*volatile_comp[vol]/P_boa
                     frac[vol] += O_abun
-                    #print(vol, volatile_comp[vol], self.P_volatile)
                 else:
-                    ##print('calculating fastchem abundance for', vol)
                     frac[vol] = self.P_volatile*volatile_comp[vol]/P_boa
-                    #print(frac[vol])
-
-
-
 
         '''
         Normalize elemental abundances
         '''
         fracN = {}
-        # print(frac.values())
         sum_fracs = sum(frac.values())
-        # print(sum_fracs)
         for el in frac:
             if sum_fracs> 0.0:
                 fracN[el] = frac[el]/sum_fracs
@@ -485,10 +443,9 @@ class melt_vapor_system:
 
         verbose = False
         if verbose:
-            print('Normalized fractional abundances:')
+            log.info('Normalized fractional abundances:')
             for el in fracN:
-                print(el)
-                print(fracN[el])
+                log.info(str(el)+': '+str(fracN[el]))
 
         # Open abundance file template
         # TODO: Consider not hardcoding this (moving to paths file)
@@ -530,10 +487,8 @@ class melt_vapor_system:
     def vapor_partial_pressure_calc(self, fO2, T):
 
         partial_pressures_vapor = pd.DataFrame()
-        # print(partial_pressures_vapor)
         a = self.melt.a.loc[T]
         logKr = self.logKr.loc[T]
-        # print(logKr)
 
         # O does not require oxide, hence separate
         partial_pressures_vapor[0] = 10**logKr[0] * fO2**self.cdef['di'].iloc[0]
@@ -570,14 +525,6 @@ class melt_vapor_system:
                 a_liq_oxide2 = 1
             else:
                 a_liq_oxide2 = a[liq_oxide2]
-            
-            # print('DEBUG')
-            # print(logKr[i])
-            # print(a_endmember**ci)
-            # print(a_liq_oxide1**ei)
-            # print(a_liq_oxide2**fi)
-            # print(fO2)
-
             # Calculating partial pressure
             partial_pressures_vapor[i] = 10**logKr[i]\
                                   * a_endmember**ci\
@@ -585,7 +532,6 @@ class melt_vapor_system:
                                   * a_liq_oxide1**ei\
                                   * a_liq_oxide2**fi
 
-            # print('pp', partial_pressures_vapor[i])
 
         return partial_pressures_vapor
 
@@ -705,14 +651,6 @@ class melt_vapor_system:
         return logKr
 
     def edit_fastchem_configs(self,T,P):
-        # print(T,P)
-        # print(f'Running FastChem for single point at T: {T[0]} [K] and P: {P[0]:.3e} [bar]')
-         # Open parameter template file
-        
-        #tp_point_path = self.fastchem_dir+'input/tp_point.dat' 
-        #tp_file = open(self.fastchem_dir+tp_point_path, 'w')
-
-
         '''
         Editing TP point
         '''
@@ -738,13 +676,11 @@ class melt_vapor_system:
         '''
         Editing fastchem input config file
         '''
-        # print('\nEditing FastChem config')
        
         config_path = self.fastchem_output+'config.input'
         param_path = self.fastchem_output+'parameters.dat'
 
         # Config file
-        #print(self.fastchem_dir)
         template_path_config = self.config_template
 
         # Open parameter template fileself.fastchem_dir + 'input/logK/logK.dat'
@@ -776,7 +712,6 @@ class melt_vapor_system:
         '''
         Editing param file
         '''
-        # print('Editing FastChem param')
         # Parameter file
 
         '''
@@ -811,8 +746,8 @@ class melt_vapor_system:
                                 cwd=f'{self.fastchem_dir}',stdout=subprocess.DEVNULL)
             #subprocess.check_call(['./fastchem', 'input/config.input'],cwd=self.fastchem_dir,stdout=subprocess.DEVNULL)
         except: 
-            print(f'\nFastChem cannot run properly.')
-            print(f'Try compile it by running make under {self.fastchem_dir}\n'); raise 
+            log.error(f'\nFastChem cannot run properly.')
+            log.error(f'Try compile it by running make under {self.fastchem_dir}\n'); raise 
 
     def read_fastchem_partial_pressures(self):
 
@@ -903,24 +838,18 @@ class MeltState:
 
         # Set dictionary labels to oxides allowed by melts
         melt_comp = {} # dict([(ox,0) for ox in self.liq_phs.OXIDES])
-        #   print('input composition:',input_comp)
         for species in input_comp:
 
             if species not in self.liq_phs.OXIDES: # Check validity of input
-                print(f'ERROR: {species} not allowed. Composition not set.')
+                log.error(f'{species} not allowed. Composition not set.')
                 return  
             else: 
                 melt_comp[species] = input_comp[species]
         
             if species not in self.used_oxides:
-                print(f'WARNING: input value for {species} passed. Species not'
+                log.warning(f'input value for {species} passed. Species not'
                       + f' (yet) included in vaporisation calculations.')
             
-        # Set melt comp in thermoengine class
-        #self.melts.set_bulk_composition(melt_comp)
-        #if verbose:
-            #print(f'Melt composition set to: {melt_comp}')
-
         # Save included oxides
         self.included_oxides = {}
         for ox in melt_comp:
@@ -929,7 +858,6 @@ class MeltState:
             else:
                 self.included_oxides[ox] = True
         self.comp=melt_comp
-        #print(melt_comp)
         return melt_comp
     
     
@@ -956,17 +884,12 @@ class MeltState:
         # Calculates endmember chemical potentials using MELTS function
         mu0_endmember = np.array([self.liq_phs.gibbs_energy(T,P_melt,mol=imol)\
                                   for imol in np.eye(15)])
-        #print(mu0_endmember.shape)
-        #print(np.shape(T))
-        #print(pd.DataFrame(mu0_endmember,index=self.liq_phs.endmember_names,columns=T))
         self.mu0_liquid = pd.DataFrame(mu0_endmember,index=self.liq_phs.endmember_names,columns=T).T
 
         for oxide in self.nonendmember_oxide_names:
             # Try to interpolate, if outside range of database uses linear fit 
             # of last four data points to extrapolate to higher temperatures. 
             phase=thermo_data[oxide+'(l)']
-            #print(type(phase))
-            #print(dir(phase))
             max_temp = thermo_data[oxide+'(l)'].T.iloc[-1]
             T_interp = T[T<=max_temp]
             T_extrap = T[T>max_temp]
@@ -999,13 +922,10 @@ class MeltState:
         '''
         a = {}
         mantle_comp=self.comp
-        #print(mantle_comp)
         self.mol_oxides = core.chem.format_mol_oxide_comp(mantle_comp,convert_grams_to_moles=True)
-        #print(self.mol_oxides)
         self.moles_end,self.oxide_res= self.liq_phs.calc_endmember_comp(mol_oxide_comp=self.mol_oxides, method='intrinsic', output_residual=True)
-        #print(self.moles_end,self.oxide_res)
         if not self.liq_phs.test_endmember_comp(self.moles_end):
-            print ("Calculated composition is infeasible!")
+            log.warning("Calculated composition is infeasible!")
         self.mol_elm = self.liq_phs.convert_endmember_comp(self.moles_end,output='moles_elements')
         blk_cmp = []
         for elm in self.elm_sys: 
@@ -1034,5 +954,4 @@ class MeltState:
 
             a[temp] = np.exp((chem_pots-chem_pots_endms)/ R / temp)
            
-        #print('activities saved:',pd.DataFrame(a,index=self.liq_phs.endmember_names).T)
         self.a = pd.DataFrame(a,index=self.liq_phs.endmember_names).T
