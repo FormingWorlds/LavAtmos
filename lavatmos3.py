@@ -155,7 +155,7 @@ class melt_vapor_system:
                         }
 
     def vaporise(self, T, P_volatile, melt_comp, volatile_comp ,melt_fraction=1.0 , P_melt = 0.01,\
-                          fO2_initial_guess = 1e-10, fO2_tries_from_last=False,xatol=1e-6,\
+                          fO2_initial_guess = 1e-10, fO2_tries_from_last=False, xatol=1e-6,\
                           verbose = True):
 
         self.P_volatile = P_volatile
@@ -182,14 +182,22 @@ class melt_vapor_system:
         lb=np.log10(min(fO2_tries))
         ub=np.log10(max(fO2_tries))
 
-        from scipy.optimize import minimize_scalar
+        from scipy.optimize import minimize_scalar,fsolve
 
                 # tHis now computes mass balance with new abundances accounting for previously present oxygen 
         def mass_balance(logfO2):
             fO2 = 10.0**logfO2
             return abs(self.mass_balance_equation_fastchem(fO2,T, volatile_comp,xatol=xatol))
 
-        res = minimize_scalar(mass_balance, bounds=(lb, ub), method="bounded",options={"xatol": xatol})
+        if  fO2_tries_from_last==False :
+            res = minimize_scalar(mass_balance, bounds=(lb, ub), method="bounded",options={"xatol": xatol})
+        
+        else:
+            res = fsolve(self.mass_balance_equation_fastchem,\
+                                                  fO2_initial_guess,args=(T,volatile_comp),xtol=1e-9,
+                                                  factor=90, maxfev=1000)
+
+
 
         fO2_best = 10**res.x
         log.debug(f'LavAtmos best fO2: {fO2_best:.2e} bar')
@@ -282,7 +290,7 @@ class melt_vapor_system:
         else:
             log.debug('LavAtmos no initial mass balance guess, no oxygen in atmosphere')
 
-        from scipy.optimize import minimize_scalar,fsolve
+        from scipy.optimize import minimize_scalar
 
         def objective(logO):
             O_abun=10**logO
