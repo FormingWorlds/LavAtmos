@@ -155,7 +155,8 @@ class melt_vapor_system:
                         }
 
     def vaporise(self, T, P_volatile, melt_comp, volatile_comp ,melt_fraction=1.0 , P_melt = 0.01,\
-                          fO2_initial_guess = 1e-10,xatol=1e-6,\
+                          fO2_initial_guess = 1e-10,xatol=1e-6,
+                          fO2_tries_from_last = False,
                           verbose = True):
 
         self.P_volatile = P_volatile
@@ -175,12 +176,12 @@ class melt_vapor_system:
                 
         #find initial O2 partial pressure before outgassing -> intheory we actually know this from calliope, so sould also use that output instead
         #not sure if this approach works - maybe I need to instead find the overall O-inventory
-
-
-        fO2_tries = 10**self.fO2_interp_func(T[0])*np.array([1e-7,1e-5,1e-3,1e-2,1e-1,1e0,1e1,1e2,1e4,1e6])
-        fO2_tries = np.append([fO2_initial_guess], fO2_tries)
-        lb=np.log10(min(fO2_tries))
-        ub=np.log10(max(fO2_tries))
+        if fO2_tries_from_last:
+            lb = np.log10(fO2_initial_guess/100)
+            ub = np.log10(fO2_initial_guess*100)
+        else:
+            lb=self.fO2_interp_func(T[0]) - 4.0
+            ub=self.fO2_interp_func(T[0]) + 6.0
 
         from scipy.optimize import minimize_scalar
 
