@@ -155,7 +155,7 @@ class melt_vapor_system:
                         }
 
     def vaporise(self, T, P_volatile, melt_comp, volatile_comp ,melt_fraction=1.0 , P_melt = 0.01,\
-                          fO2_initial_guess = 1e-10,xatol=1e-6,\
+                          fO2_initial_guess = 1e-10, fO2_tries_from_last=False,xatol=1e-6,\
                           verbose = True):
 
         self.P_volatile = P_volatile
