@@ -170,16 +170,19 @@ class melt_vapor_system:
         if type(T) != np.ndarray:
             T = np.array([T])
         
-    
         self.melt_comp = self.melt.set_melt_comp(melt_comp,verbose) 
         self.melt.calculate_melt_chemical_potentials(T,P_melt,self.thermo_data)
         self.melt.calculate_melt_activities(T,P_melt)            
         self.logKr = self.logKr_calc(T,self.melt.mu0_liquid)
 
-
-                
         #find initial O2 partial pressure before outgassing -> intheory we actually know this from calliope, so sould also use that output instead
         #not sure if this approach works - maybe I need to instead find the overall O-inventory
+        if fO2_tries_from_last:
+            lb = np.log10(fO2_initial_guess/100)
+            ub = np.log10(fO2_initial_guess*100)
+        else:
+            lb=self.fO2_interp_func(T[0]) - 4.0
+            ub=self.fO2_interp_func(T[0]) + 6.0
 
         # tHis now computes mass balance with new abundances accounting for previously present oxygen
         def mass_balance(logfO2):
