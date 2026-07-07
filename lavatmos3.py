@@ -9,6 +9,7 @@ log = logging.getLogger('fwl.' + __name__)
 import numpy as np
 import pandas as pd
 from scipy.interpolate import interp1d
+from scipy.optimize import brentq, minimize_scalar
 import subprocess
 import os
 
@@ -38,6 +39,10 @@ class melt_vapor_system:
         # Constants
         self._R = 8.314
         self.Tr = 298.15
+
+        # Warm-start cache for the inner O-abundance solve (see
+        # mass_balance_equation_fastchem / _solve_scalar_root)
+        self._last_logO = None
 
         # Points used as a smart start for fO2
         t_dep_points = {}
@@ -176,32 +181,27 @@ class melt_vapor_system:
         #find initial O2 partial pressure before outgassing -> intheory we actually know this from calliope, so sould also use that output instead
         #not sure if this approach works - maybe I need to instead find the overall O-inventory
 
-
-        fO2_tries = 10**self.fO2_interp_func(T[0])*np.array([1e-7,1e-5,1e-3,1e-2,1e-1,1e0,1e1,1e2,1e4,1e6])
-        fO2_tries = np.append([fO2_initial_guess], fO2_tries)
-        lb=np.log10(min(fO2_tries))
-        ub=np.log10(max(fO2_tries))
-
-        from scipy.optimize import minimize_scalar,fsolve
-
-                # tHis now computes mass balance with new abundances accounting for previously present oxygen 
+        # tHis now computes mass balance with new abundances accounting for previously present oxygen
         def mass_balance(logfO2):
             fO2 = 10.0**logfO2
-            return abs(self.mass_balance_equation_fastchem(fO2,T, volatile_comp,xatol=xatol))
+            return self.mass_balance_equation_fastchem(fO2,T, volatile_comp,xatol=xatol)
 
-        if  fO2_tries_from_last==False :
-            res = minimize_scalar(mass_balance, bounds=(lb, ub), method="bounded",options={"xatol": xatol})
-        
-        else:
-            res = fsolve(self.mass_balance_equation_fastchem,\
-                                                  fO2_initial_guess,args=(T,volatile_comp),xtol=1e-9,
-                                                  factor=90, maxfev=1000)
+        # fO2_initial_guess is PROTEUS's last-best fO2 for this run (only
+        # meaningful once fO2_tries_from_last is set, i.e. not the first
+        # iteration); warm-start the root solve from it, same as the inner
+        # O-abundance solve warm-starts from self._last_logO. When
+        # fO2_tries_from_last is set, [lb, ub] is already x0 +/- 2 decades,
+        # so the default window (2.0) would just repeat the same bracket
+        # the fallback tries anyway -- use a narrower window here so the
+        # warm start is actually a smaller, faster first attempt.
+        logfO2_x0 = np.log10(fO2_initial_guess) if fO2_tries_from_last else None
 
+        logfO2_best = self._solve_scalar_root(mass_balance, lb, ub, xatol,
+                                               x0=logfO2_x0, window=0.5,
+                                               label='outer fO2 solve')
 
-
-        fO2_best = 10**res.x
+        fO2_best = 10**logfO2_best
         log.debug(f'LavAtmos best fO2: {fO2_best:.2e} bar')
-        log.debug(f'LavAtmos optimization results: {res}')
 
         #subtract previouly available oxygen from oxygen that will be outgassed.
         fO2_outgassed = fO2_best  #maybe better from mass balance
@@ -256,6 +256,57 @@ class melt_vapor_system:
     
 
 
+    def _root_or_none(self, func, lb, ub, xtol):
+        '''
+        Attempt to find a root of func on [lb, ub] with Brent's method.
+        Returns None (instead of raising) if the interval does not
+        bracket a sign change.
+        '''
+        try:
+            return brentq(func, lb, ub, xtol=xtol)
+        except ValueError:
+            return None
+
+    def _solve_scalar_root(self, func, lb, ub, xatol, x0=None, window=2.0, label=''):
+        '''
+        Find x such that func(x) = 0 on [lb, ub].
+
+        The mass-balance/fO2-matching equations solved here are signed
+        residuals with (in the well-posed regime) a single sign change
+        in [lb, ub], so this is fundamentally a root-finding problem.
+        Previously it was solved by minimising abs(func(x)) with bounded
+        Brent minimisation; the abs() introduces a non-smooth kink right
+        at the root, which defeats Brent's parabolic-interpolation step
+        and degrades convergence to the much slower golden-section rate.
+        Solving for the root directly (brentq) needs far fewer function
+        evaluations for the same tolerance -- each evaluation here is an
+        external FastChem subprocess call, so this matters a lot.
+
+        If x0 is given (e.g. the O-abundance solution from a previous,
+        nearby fO2 trial), a tighter bracket around x0 is tried first as
+        a warm start. Falls back to the full [lb, ub] bracket, and
+        finally to the original bounded-minimisation-of-|func| behaviour
+        if no sign change can be found anywhere in [lb, ub], so the
+        result is always defined.
+        '''
+        if x0 is not None:
+            tlb, tub = max(lb, x0 - window), min(ub, x0 + window)
+            x = self._root_or_none(func, tlb, tub, xatol)
+            if x is not None:
+                log.debug(f'LavAtmos {label}: root found via warm-started brentq near {x0}: x={x}')
+                return x
+
+        x = self._root_or_none(func, lb, ub, xatol)
+        if x is not None:
+            log.debug(f'LavAtmos {label}: root found via brentq: x={x}')
+            return x
+
+        log.debug(f'LavAtmos {label}: bounds [{lb}, {ub}] do not bracket a root; '
+                  'falling back to bounded minimisation of |residual|.')
+        res = minimize_scalar(lambda z: abs(func(z)), bounds=(lb, ub),
+                               method='bounded', options={'xatol': xatol})
+        return res.x
+
     def mass_balance_equation_fastchem(self,fO2,T, volatile_comp,xatol=1e-6):
 
         '''
@@ -290,22 +341,16 @@ class melt_vapor_system:
         else:
             log.debug('LavAtmos no initial mass balance guess, no oxygen in atmosphere')
 
-        from scipy.optimize import minimize_scalar
-
         def objective(logO):
             O_abun=10**logO
-            return abs( self.inner_loop(O_abun, T, fO2, P_boa, vapor_partial_pressures, volatile_comp, meltfrac=1.0))
-        
+            return self.inner_loop(O_abun, T, fO2, P_boa, vapor_partial_pressures, volatile_comp, meltfrac=1.0)
 
-        res = minimize_scalar(
-        objective,
-        bounds=(-12, 12),
-        method="bounded",
-        options={"xatol": xatol}
-        )
+        logO_sol = self._solve_scalar_root(objective, -12, 12, xatol,
+                                            x0=self._last_logO,
+                                            label='inner O_abun solve')
+        self._last_logO = logO_sol
 
-        self.O_abun = 10**res.x #thi sis now the extra O abundance that is required to reproduce the PO2 guessed
-        #self.O_abun = 10**logO_sol
+        self.O_abun = 10**logO_sol #thi sis now the extra O abundance that is required to reproduce the PO2 guessed
         log.debug('Best O-abundances'+str(self.O_abun))
         partial_pressures = self.calculate_partial_pressures_fastchem_loop(self.O_abun,T,P_boa,vapor_partial_pressures,volatile_comp,meltfrac=1.0)
 
