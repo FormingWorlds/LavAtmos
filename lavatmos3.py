@@ -55,31 +55,18 @@ class melt_vapor_system:
         
         # Importing stoichiometries for reactions
         fname_cdef_values = 'cdef_values_vapor_reactions_2.csv'
-        dname_cdef_values = paths.lavatmos_dir + '/data/'
-        self.cdef = pd.read_csv(dname_cdef_values+fname_cdef_values).set_index('vapor')
+        dname_cdef_values = os.path.join(paths.lavatmos_dir, 'data')
+        self.cdef = pd.read_csv(os.path.join(dname_cdef_values, fname_cdef_values)).set_index('vapor')
 
         fname_ml_values = 'mass_law_values.csv'
-        #dname_ml_values = '/data3/leoni/PROTEUS/LavAtmos/data/'
-        dname_ml_values = paths.lavatmos_dir + '/data/'
-        self.ml_values = pd.read_csv(dname_ml_values+fname_ml_values).set_index('species')
+        dname_ml_values = os.path.join(paths.lavatmos_dir, 'data')
+        self.ml_values = pd.read_csv(os.path.join(dname_ml_values, fname_ml_values)).set_index('species')
         
         # Importing thermo data
         self.thermo_data = janaf_data_importer() # janaf data
         self.thermo_data.update(barin_data_importer())
 
         # FastChem 
-        ######################################################################
-        ## This needs to be changed depending on where FastChem is located! ##
-        ########## Comment out whichever lines suit your usecase. ############
-        ######################################################################
-
-        # Try FC from os.environ
-        #if 'FC_DIR' in os.environ:
-            #self.fastchem_dir = os.environ['FC_DIR']
-            #self.abundances_location = os.environ['FC_DIR'] + 'input/element_abundances/'
-
-        #else:
-            # For if LavAtmos2 is being run as part of the BigPipe
         self.fastchem_dir = paths.fastchem3_dir
         self.fastchem_output=paths.fastchem3_output
         self.fastchem_column_names = ['#p(bar)','T(K)','n_<tot>(cm-3)','n_g(cm-3)','m(u)']
@@ -724,7 +711,7 @@ class melt_vapor_system:
         '''
 
 
-        template_path_tp = self.lavatmos_dir + 'input/fastchem3/tp_point_template.dat'
+        template_path_tp = os.path.join(self.lavatmos_dir, 'input/fastchem3/tp_point_template.dat')
 
         # Open parameter template fileself.fastchem_dir + 'input/logK/logK.dat'
         template_tp = open(template_path_tp)
@@ -812,14 +799,13 @@ class melt_vapor_system:
             subprocess.check_call([f'./fastchem {self.fastchem_output}config.input'],\
                                 shell=True,\
                                 cwd=f'{self.fastchem_dir}',stdout=subprocess.DEVNULL)
-            #subprocess.check_call(['./fastchem', 'input/config.input'],cwd=self.fastchem_dir,stdout=subprocess.DEVNULL)
         except: 
-            log.error(f'\nFastChem cannot run properly.')
-            log.error(f'Try compile it by running make under {self.fastchem_dir}\n'); raise 
+            log.error(f'Exited during FastChem call.')
+            log.error(f'If this was not intended, try re-compiling FastChem at: {self.fastchem_dir}')
 
     def read_fastchem_partial_pressures(self):
 
-        fname = self.fastchem_output+'boa_chem.dat'
+        fname = os.path.join(self.fastchem_output, 'boa_chem.dat')
         fastchem_partial_pressures = pd.read_csv(fname, sep=r'\s+')
         return fastchem_partial_pressures.drop(columns=self.fastchem_column_names)\
                *fastchem_partial_pressures[self.fastchem_column_names[0]].iloc[0]
@@ -873,11 +859,11 @@ class MeltState:
         self.lavatmos_dir = paths.lavatmos_dir
         fname_cdef_liq_values = 'cdef_values_liquid_reactions.csv'
         if paths.lavatmos_dir is None:
-            dname_cdef_liq_values = '/data3/leoni/LavAtmos/ThermoEngine/LavAtmos/data/'
+            raise ValueError('LavAtmos directory not set.')
         else:
-           dname_cdef_liq_values =  self.lavatmos_dir  + '/data/'    
-        self.cdef_liq = pd.read_csv(dname_cdef_liq_values\
-                                + fname_cdef_liq_values).set_index('liq_oxide')
+            dname_cdef_liq_values =  os.path.join(self.lavatmos_dir, 'data')
+        self.cdef_liq = pd.read_csv(os.path.join(dname_cdef_liq_values, fname_cdef_liq_values))\
+                                .set_index('liq_oxide')
         
         # Oxides that are included in calculations
         self.used_oxides = ['SiO2','MgO','Al2O3','FeO','CaO','Na2O','K2O',\
