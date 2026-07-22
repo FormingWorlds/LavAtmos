@@ -103,9 +103,16 @@ class melt_vapor_system:
         self.vaporised_elements = ['Al', 'Ca', 'Fe', 'K', 'Mg', 'Na',\
                                    'O', 'Si', 'Ti']
                             
+        # Includes the noble gases (He, Ne, Ar, Kr, Xe) so the full element set
+        # supported by PROTEUS/AGNI can be carried through the FastChem
+        # speciation. The noble gases are chemically inert: they take no part in
+        # the vapour reactions and are passed through as monatomic gas.
         self.all_elements = ['C','H','He','N','O','P','S','Si','Ti',\
-                             'V','Cl','K','Na','Mg','F','Ca','Fe','Al']
+                             'V','Cl','K','Na','Mg','F','Ca','Fe','Al',\
+                             'Ne','Ar','Kr','Xe']
 
+        # Noble gases carry a zero mass-law contribution: being inert, they do
+        # not enter the fO2 mass-balance residual, only dilute the atmosphere.
         self.mass_law_contribution = {'C' : 0,
                                       'H' : 0,
                                       'He': 0,
@@ -123,7 +130,11 @@ class melt_vapor_system:
                                       'F' : 0,
                                       'Ca':-0.5,
                                       'Fe':-0.75,
-                                      'Al':-0.75}
+                                      'Al':-0.75,
+                                      'Ne': 0,
+                                      'Ar': 0,
+                                      'Kr': 0,
+                                      'Xe': 0}
                                         
 
 
