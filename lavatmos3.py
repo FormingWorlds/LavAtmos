@@ -47,8 +47,12 @@ class melt_vapor_system:
         # Points used as a smart start for fO2
         t_dep_points = {}
         t_dep_points = {}
-        t_dep_points['T'] = [2000,2500,3000,3500,4000]
-        t_dep_points['fO2'] = np.log10([1e-16,1e-11,1e-5,1e-2,1e0])
+        # log10 fO2 [bar] solved for a volatile-free BSE melt (BSE_palm) at each T
+        # (~IW+2.3 to +3.4, O'Neill & Eggins 2002). The previous guesses
+        # [1e-16,1e-11,1e-5,1e-2,1e0] at [2000,...,4000] K were 6-8 dex lower, so the
+        # default bracket [guess-4, guess+6] missed the root at <= 3000 K.
+        t_dep_points['T'] = [1750,2000,2250,2500,3000,3500,4000]
+        t_dep_points['fO2'] = [-5.7,-4.4,-3.5,-2.6,-1.2,-0.1,0.8]
         #t_dep_points['fO2'] = np.log10([1e-18,1e-13,1e-7,1e-4,1e-2])
         self.fO2_interp_func = interp1d(t_dep_points['T'], t_dep_points['fO2'], fill_value='extrapolate')
  
