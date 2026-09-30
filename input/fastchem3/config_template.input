@@ -5,10 +5,10 @@
 g
 
 #Chemistry output file
-<<output_abundance_fname>> output/condensates.dat
+<<output_abundance_fname>> <<output_condensate_fname>>
 
 #Monitor output file
-output/monitor.dat
+<<output_monitor_fname>>
 
 #FastChem console verbose level (1 - 4); 1 = almost silent, 4 = detailed console output
 0
@@ -29,7 +29,7 @@ MR
 1.0e-6
 
 #Max number of chemistry iterations 
-150000  
+5000
 
 #Max number internal solver iterations
 100000
