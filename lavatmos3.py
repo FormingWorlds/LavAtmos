@@ -215,7 +215,15 @@ class melt_vapor_system:
         P_outgassed = vapor_partial_pressures.sum(axis=1).iloc[0]+fO2_outgassed
         P_boa = P_outgassed + self.P_volatile
         partial_pressures = self.calculate_partial_pressures_fastchem_loop([self.O_abun],T,[P_boa],vapor_partial_pressures,volatile_comp,meltfrac=melt_fraction)
-                
+
+        # The vapour above was computed at fO2_best, so FastChem's O2 must match it. It
+        # does not when the inner O-abundance solve fails, e.g. when a volatile oxygen
+        # budget alone holds pO2 above fO2_best; the vapour is then out of equilibrium
+        # with the gas it is mixed into.
+        pO2_gas = partial_pressures['O2'].iloc[0]
+        if abs(np.log10(pO2_gas / fO2_best)) > 0.01:
+            log.warning(f'LavAtmos: FastChem pO2 ({pO2_gas:.3e} bar) differs from the solved '
+                        f'fO2 ({fO2_best:.3e} bar); melt-vapour equilibrium is not satisfied')
 
         return partial_pressures
 
