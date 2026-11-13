@@ -47,39 +47,30 @@ class melt_vapor_system:
         # Points used as a smart start for fO2
         t_dep_points = {}
         t_dep_points = {}
-        t_dep_points['T'] = [2000,2500,3000,3500,4000]
-        t_dep_points['fO2'] = np.log10([1e-16,1e-11,1e-5,1e-2,1e0])
+        # log10 fO2 [bar] solved for a volatile-free BSE melt (BSE_palm) at each T
+        # (~IW+2.3 to +3.4, O'Neill & Eggins 2002). The previous guesses
+        # [1e-16,1e-11,1e-5,1e-2,1e0] at [2000,...,4000] K were 6-8 dex lower, so the
+        # default bracket [guess-4, guess+6] missed the root at <= 3000 K.
+        t_dep_points['T'] = [1750,2000,2250,2500,3000,3500,4000]
+        t_dep_points['fO2'] = [-5.7,-4.4,-3.5,-2.6,-1.2,-0.1,0.8]
         #t_dep_points['fO2'] = np.log10([1e-18,1e-13,1e-7,1e-4,1e-2])
         self.fO2_interp_func = interp1d(t_dep_points['T'], t_dep_points['fO2'], fill_value='extrapolate')
  
         
         # Importing stoichiometries for reactions
         fname_cdef_values = 'cdef_values_vapor_reactions_2.csv'
-        dname_cdef_values = paths.lavatmos_dir + '/data/'
-        self.cdef = pd.read_csv(dname_cdef_values+fname_cdef_values).set_index('vapor')
+        dname_cdef_values = os.path.join(paths.lavatmos_dir, 'data')
+        self.cdef = pd.read_csv(os.path.join(dname_cdef_values, fname_cdef_values)).set_index('vapor')
 
         fname_ml_values = 'mass_law_values.csv'
-        #dname_ml_values = '/data3/leoni/PROTEUS/LavAtmos/data/'
-        dname_ml_values = paths.lavatmos_dir + '/data/'
-        self.ml_values = pd.read_csv(dname_ml_values+fname_ml_values).set_index('species')
+        dname_ml_values = os.path.join(paths.lavatmos_dir, 'data')
+        self.ml_values = pd.read_csv(os.path.join(dname_ml_values, fname_ml_values)).set_index('species')
         
         # Importing thermo data
         self.thermo_data = janaf_data_importer() # janaf data
         self.thermo_data.update(barin_data_importer())
 
         # FastChem 
-        ######################################################################
-        ## This needs to be changed depending on where FastChem is located! ##
-        ########## Comment out whichever lines suit your usecase. ############
-        ######################################################################
-
-        # Try FC from os.environ
-        #if 'FC_DIR' in os.environ:
-            #self.fastchem_dir = os.environ['FC_DIR']
-            #self.abundances_location = os.environ['FC_DIR'] + 'input/element_abundances/'
-
-        #else:
-            # For if LavAtmos2 is being run as part of the BigPipe
         self.fastchem_dir = paths.fastchem3_dir
         self.fastchem_output=paths.fastchem3_output
         self.fastchem_column_names = ['#p(bar)','T(K)','n_<tot>(cm-3)','n_g(cm-3)','m(u)']
@@ -103,9 +94,16 @@ class melt_vapor_system:
         self.vaporised_elements = ['Al', 'Ca', 'Fe', 'K', 'Mg', 'Na',\
                                    'O', 'Si', 'Ti']
                             
+        # Includes the noble gases (He, Ne, Ar, Kr, Xe) so the full element set
+        # supported by PROTEUS/AGNI can be carried through the FastChem
+        # speciation. The noble gases are chemically inert: they take no part in
+        # the vapour reactions and are passed through as monatomic gas.
         self.all_elements = ['C','H','He','N','O','P','S','Si','Ti',\
-                             'V','Cl','K','Na','Mg','F','Ca','Fe','Al']
+                             'V','Cl','K','Na','Mg','F','Ca','Fe','Al',\
+                             'Ne','Ar','Kr','Xe']
 
+        # Noble gases carry a zero mass-law contribution: being inert, they do
+        # not enter the fO2 mass-balance residual, only dilute the atmosphere.
         self.mass_law_contribution = {'C' : 0,
                                       'H' : 0,
                                       'He': 0,
@@ -123,7 +121,11 @@ class melt_vapor_system:
                                       'F' : 0,
                                       'Ca':-0.5,
                                       'Fe':-0.75,
-                                      'Al':-0.75}
+                                      'Al':-0.75,
+                                      'Ne': 0,
+                                      'Ar': 0,
+                                      'Kr': 0,
+                                      'Xe': 0}
                                         
 
 
@@ -213,7 +215,15 @@ class melt_vapor_system:
         P_outgassed = vapor_partial_pressures.sum(axis=1).iloc[0]+fO2_outgassed
         P_boa = P_outgassed + self.P_volatile
         partial_pressures = self.calculate_partial_pressures_fastchem_loop([self.O_abun],T,[P_boa],vapor_partial_pressures,volatile_comp,meltfrac=melt_fraction)
-                
+
+        # The vapour above was computed at fO2_best, so FastChem's O2 must match it. It
+        # does not when the inner O-abundance solve fails, e.g. when a volatile oxygen
+        # budget alone holds pO2 above fO2_best; the vapour is then out of equilibrium
+        # with the gas it is mixed into.
+        pO2_gas = partial_pressures['O2'].iloc[0]
+        if abs(np.log10(pO2_gas / fO2_best)) > 0.01:
+            log.warning(f'LavAtmos: FastChem pO2 ({pO2_gas:.3e} bar) differs from the solved '
+                        f'fO2 ({fO2_best:.3e} bar); melt-vapour equilibrium is not satisfied')
 
         return partial_pressures
 
@@ -713,7 +723,7 @@ class melt_vapor_system:
         '''
 
 
-        template_path_tp = self.lavatmos_dir + 'input/fastchem3/tp_point_template.dat'
+        template_path_tp = os.path.join(self.lavatmos_dir, 'input/fastchem3/tp_point_template.dat')
 
         # Open parameter template fileself.fastchem_dir + 'input/logK/logK.dat'
         template_tp = open(template_path_tp)
@@ -801,14 +811,13 @@ class melt_vapor_system:
             subprocess.check_call([f'./fastchem {self.fastchem_output}config.input'],\
                                 shell=True,\
                                 cwd=f'{self.fastchem_dir}',stdout=subprocess.DEVNULL)
-            #subprocess.check_call(['./fastchem', 'input/config.input'],cwd=self.fastchem_dir,stdout=subprocess.DEVNULL)
         except: 
-            log.error(f'\nFastChem cannot run properly.')
-            log.error(f'Try compile it by running make under {self.fastchem_dir}\n'); raise 
+            log.error(f'Exited during FastChem call.')
+            log.error(f'If this was not intended, try re-compiling FastChem at: {self.fastchem_dir}')
 
     def read_fastchem_partial_pressures(self):
 
-        fname = self.fastchem_output+'boa_chem.dat'
+        fname = os.path.join(self.fastchem_output, 'boa_chem.dat')
         fastchem_partial_pressures = pd.read_csv(fname, sep=r'\s+')
         return fastchem_partial_pressures.drop(columns=self.fastchem_column_names)\
                *fastchem_partial_pressures[self.fastchem_column_names[0]].iloc[0]
@@ -862,11 +871,11 @@ class MeltState:
         self.lavatmos_dir = paths.lavatmos_dir
         fname_cdef_liq_values = 'cdef_values_liquid_reactions.csv'
         if paths.lavatmos_dir is None:
-            dname_cdef_liq_values = '/data3/leoni/LavAtmos/ThermoEngine/LavAtmos/data/'
+            raise ValueError('LavAtmos directory not set.')
         else:
-           dname_cdef_liq_values =  self.lavatmos_dir  + '/data/'    
-        self.cdef_liq = pd.read_csv(dname_cdef_liq_values\
-                                + fname_cdef_liq_values).set_index('liq_oxide')
+            dname_cdef_liq_values =  os.path.join(self.lavatmos_dir, 'data')
+        self.cdef_liq = pd.read_csv(os.path.join(dname_cdef_liq_values, fname_cdef_liq_values))\
+                                .set_index('liq_oxide')
         
         # Oxides that are included in calculations
         self.used_oxides = ['SiO2','MgO','Al2O3','FeO','CaO','Na2O','K2O',\
