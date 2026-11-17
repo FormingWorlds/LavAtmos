@@ -328,8 +328,9 @@ class melt_vapor_system:
 
     def read_phi_mix(self):
         '''Atoms per gas molecule (n_<tot>/n_g) of the last FastChem run.'''
-        raw = pd.read_csv(self.fastchem_output_path(), sep=r'\s+')
-        return float(raw['n_<tot>'].iloc[0] / raw['n_g'].iloc[0])
+        fname = os.path.join(self.fastchem_output, 'boa_chem.dat')
+        fastchem_pps = pd.read_csv(fname, sep=r'\s+')
+        return float(fastchem_pps['n_<tot>(cm-3)'].iloc[0] / fastchem_pps['n_g(cm-3)'].iloc[0])
  
     def solve_P_boa(self, O_abun, T, vapor_partial_pressures, volatile_comp, fO2,
                     rtol=1e-5, maxiter=30):
@@ -455,7 +456,7 @@ class melt_vapor_system:
 
 
 
-    def mass_balance_equation_fastchem(self,fO2,T, volatile_comp,xatol=1e-6):
+    def mass_balance_equation_fastchem(self,O_abun,fO2,T, volatile_comp):
 
         '''
         Equation that needs to be solved for fO2.
@@ -482,13 +483,13 @@ class melt_vapor_system:
 
 
 
-    def calculate_partial_pressures_fastchem_loop(self,O_abun,T,P_boa,vapor_partial_pressures, volatile_comp, meltfrac):
+    def calculate_partial_pressures_fastchem_loop(self,O_abun,T,P_boa,vapor_partial_pressures, volatile_comp):
 
 
         '''melt fraction can only be set <1 at the end of the loop when the balance has been determined. Then fO2 is uppdated one last time showing 
         in the partial pressures of the fastchem output'''
     
-        self.calculate_fastchem_abundance(O_abun, vapor_partial_pressures, P_boa, volatile_comp, meltfrac)
+        self.calculate_fastchem_abundance(O_abun, vapor_partial_pressures, P_boa, volatile_comp)
         self.edit_fastchem_configs(T,P_boa)
         self.run_fastchem()
 
@@ -498,7 +499,7 @@ class melt_vapor_system:
 
 
     def calculate_fastchem_abundance(self, O_abun, vapor_partial_pressures, P_boa,\
-                                     volatile_comp, meltfrac=1.0, final_output=False):
+                                     volatile_comp,final_output=False):
 
         if self.is_iterable(P_boa):
             P_boa = P_boa[0]
@@ -567,19 +568,13 @@ class melt_vapor_system:
  
         verbose = False
         if verbose:
-            print('Normalized fractional abundances:')
+            log.info('Normalized fractional abundances:')
             for el in fracN:
-                print(el)
-                print(fracN[el])
- 
-        # Open abundance file template
-        # TODO: Consider not hardcoding this (moving to paths file)
-        template_name = 'element_abundances_template2.dat'
-        #template_name = 'element_abundances_noe-.dat'
-        output_name = self.elementfile
-        solar_abund_name = 'element_abundances_solar.dat'
- 
-        template = open(self.abundances_location+template_name, 'r')
+                log.info(str(el)+': '+str(fracN[el]))
+
+    
+
+        template = open(self.abundances_template, 'r')
         elab_file = template.read()
         template.close()
  
@@ -603,9 +598,8 @@ class melt_vapor_system:
                 abund = 0
                 elab_file = elab_file.replace(f'<<{el}>>', str(abund))
         
-        # Save abundance file
-        self.abundance_fname = self.abundances_location + output_name
-        
+       # Save abundance file
+        self.abundance_fname = self.elementfile
         g = open(self.abundance_fname, 'w')
         g.write(elab_file)
         g.close()
