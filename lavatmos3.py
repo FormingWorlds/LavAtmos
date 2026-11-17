@@ -17,12 +17,16 @@ import os
 import thermoengine
 from thermoengine import equilibrate 
 from thermoengine import model,core
+import warnings
 
 
 # Local modules
 from data.databases.janaf_data_importer_gef import janaf_data_importer
 from data.databases.barin_data_importer_gef import barin_data_importer
 #from library.cacher import CachedResults
+
+class LavAtmosConvergenceError(RuntimeError):
+    """Raised when a root-find / FastChem run does not give a trustworthy result."""
 
 class melt_vapor_system:
     
@@ -161,10 +165,216 @@ class melt_vapor_system:
                         'Zn' : 4.56
                         }
 
-    def vaporise(self, T, P_volatile, melt_comp, volatile_comp ,melt_fraction=1.0 , P_melt = 0.01,\
-                          fO2_initial_guess = 1e-10, fO2_tries_from_last=False, xatol=1e-6,\
-                          verbose = True):
+    def melt_O_budget_bar(self, vapor_pp):
 
+        '''O_stoich and O_vap in bar (as atoms), from the cdef vapour species.
+        O_stoich uses each reaction's own d_i (2 d_i = n_O,i - O_stoich,i),
+        so Fe2O3- and Fe2SiO4-based rows are both handled correctly.'''
+
+        A = {el: 0.0 for el in self.vaporised_elements}
+        p = np.zeros(len(self.cdef.index))
+        for i, spec in enumerate(self.cdef.index):
+            p[i] = float(vapor_pp[i].iloc[0])
+            for el, n in self.parse_formula(spec).items():
+                if el in A:
+                    A[el] += n * p[i]
+        O_vap = A['O']
+        O_stoich = O_vap - 2.0 * np.sum(self.cdef['di'].to_numpy(dtype=float) * p)
+        return O_stoich, O_vap
+    
+    def parse_formula(self,formula):
+        import re
+        tokens = re.findall(r'([A-Z][a-z]?)(\d*)', formula)
+     
+        composition = {}
+        for element, count in tokens:
+            composition[element] = (
+                composition.get(element, 0) + int(count or 1)
+            )
+     
+        return composition
+        
+    def pure_melt_logfO2(self, t, xlo=-40.0, xhi=12.0):
+        '''log10 fO2 of the melt with no envelope: -sum_i d_i p_i(fO2) = fO2.'''
+        d = self.cdef['di'].to_numpy(dtype=float)
+        def h(x):
+            vp = self.vapor_partial_pressure_calc(10.0**x, [t])
+            p = vp.iloc[0].to_numpy(dtype=float)
+            return -np.sum(d * p) - 10.0**x
+        return brentq(h, xlo, xhi, xtol=1e-6)  
+    
+     
+    def _solve_fO2_bracketed(self, residual, x0, step=1.0, grow=1.5,
+                             xmin=-45.0, xmax=12.0, max_steps=40,
+                             xtol=1e-6, allow_unconverged=False,
+                             increasing=None, label='fO2'):
+        '''
+        Steps outward from x0 on both sides (step growing by `grow` each
+        round) until the sign of f changes between two consecutive finite
+        points on one side, then refines that bracket with brentq.
+ 
+        f returns np.nan where it cannot be evaluated (e.g. FastChem fails);
+        those points are stepped over. Each side stops on its own when it
+        leaves [xmin, xmax]. f is cached, so no point is evaluated twice.
+ 
+        Returns (root, info). Raises LavAtmosConvergenceError if no sign
+        change is found.
+        '''
+        cache = {}
+        errors = {}
+        def fc(x):
+            if x not in cache:
+                try:
+                    cache[x] = float(residual(x))
+                except (ValueError, LavAtmosConvergenceError) as e:
+                    cache[x] = np.nan
+                    errors[x] = f'{type(e).__name__}: {e}'
+            return cache[x]
+ 
+        def refine(a, b):
+            """Root in [a, b] (f(a), f(b) finite, opposite signs). brentq first;
+            if it runs into NaN points inside the bracket, NaN-tolerant bisection."""
+            def strict(x):
+                v = fc(x)
+                if not np.isfinite(v):
+                    raise LavAtmosConvergenceError('NaN inside bracket')
+                return v
+            try:
+                return brentq(strict, a, b, xtol=xtol, maxiter=100)
+            except LavAtmosConvergenceError:
+                pass
+            fa = fc(a)
+            while b - a > xtol:
+                m = None
+                for frac in (0.5, 0.25, 0.75, 0.125, 0.875, 0.0625, 0.9375):
+                    x = a + frac * (b - a)
+                    if np.isfinite(fc(x)):
+                        m = x
+                        break
+                if m is None:
+                    raise LavAtmosConvergenceError(
+                        f'{label}: residual NaN throughout ({a:.3f}, {b:.3f}) inside the bracket')
+                fm = fc(m)
+                if fm == 0:
+                    return m
+                if fa * fm < 0:
+                    b = m
+                else:
+                    a, fa = m, fm
+            return 0.5 * (a + b)
+ 
+        def check_new_point(x):
+            """Sign change between x and its nearest finite neighbour on the x0 side
+            (or on either side). Works across x0, also when f(x0) is NaN."""
+            fx = cache[x]
+            fin = sorted(k for k, v in cache.items() if np.isfinite(v))
+            i = fin.index(x)
+            for j in (i - 1, i + 1):
+                if 0 <= j < len(fin) and cache[fin[j]] * fx < 0:
+                    return tuple(sorted((x, fin[j])))
+            return None
+ 
+        f0 = fc(x0)
+        if f0 == 0:
+            return x0, dict(converged=True, residual=0.0, bracket=None, n_eval=len(cache))
+ 
+        pos  = {-1: x0, +1: x0}
+        done = {-1: False, +1: False}
+ 
+        # If f is known to be monotonic, the sign at x0 tells on which side the
+        # root lies: only search that side.
+        if increasing is not None and np.isfinite(f0):
+            root_is_lower = (f0 > 0) if increasing else (f0 < 0)
+            done[+1 if root_is_lower else -1] = True
+        dx = step
+ 
+        while not (done[-1] and done[+1]):
+            for s in (-1, +1):
+                if done[s]:
+                    continue
+                prev = pos[s]
+                pos[s] += s * dx
+                if not (xmin <= pos[s] <= xmax):
+                    # overshot: evaluate the bound itself once, so a root between
+                    # the last point and the bound is not skipped
+                    pos[s] = xmin if s < 0 else xmax
+                    done[s] = True
+                    if prev == pos[s]:
+                        continue
+                fx = fc(pos[s])
+                if not np.isfinite(fx):
+                    continue
+                br = check_new_point(pos[s])
+                if br is not None:
+                    a, b = br
+                    root = refine(a, b)
+                    return root, dict(converged=True, residual=fc(root),
+                                      bracket=(a, b), n_eval=len(cache))
+            dx *= grow
+ 
+        finite = {x: v for x, v in cache.items() if np.isfinite(v)}
+        if allow_unconverged and finite:
+            xb = min(finite, key=lambda x: abs(finite[x]))
+            warnings.warn(f'{label}: no sign change in [{xmin}, {xmax}] -- returning point '
+                          f'with smallest |residual| ({xb:.3f}: {finite[xb]:.3g}).')
+            return xb, dict(converged=False, residual=finite[xb], bracket=None, n_eval=len(cache))
+        raise LavAtmosConvergenceError(
+            f'{label}: no sign change in [{xmin}, {xmax}] from x0={x0:.2f}; '
+            f'{len(cache)} evaluations, {len(finite)} finite. '
+            f'Closest: {min(finite.items(), key=lambda kv: abs(kv[1])) if finite else None}.\n'
+            f'  Evaluated points (x: residual): '
+            + ', '.join(f'{x:.2f}: {v:.3g}' for x, v in sorted(cache.items()))
+            + (f'\n  First failure: {next(iter(errors.items()))}' if errors else ''))       
+
+    def read_phi_mix(self):
+        '''Atoms per gas molecule (n_<tot>/n_g) of the last FastChem run.'''
+        raw = pd.read_csv(self.fastchem_output_path(), sep=r'\s+')
+        return float(raw['n_<tot>'].iloc[0] / raw['n_g'].iloc[0])
+ 
+    def solve_P_boa(self, O_abun, T, vapor_partial_pressures, volatile_comp, fO2,
+                    rtol=1e-5, maxiter=30):
+        '''
+        Self-consistent surface pressure from the atom inventory:
+ 
+            P_boa = A_tot / phi_env(P_boa)
+ 
+        A_tot = phi_env*P_volatile + sum_i n_i p_i + (O_stoich - O_vap)   [atoms, in bar]
+        phi_env = atoms per molecule of the mixed gas, from FastChem.
+ 
+        This replaces both closures:
+          LavAtmos2: P_boa = sum p_vap + fO2 + P_vol     (released O assumed not to add molecules)
+          LavAtmos3: P_boa = sum p_vap - sum d_i p_i + P_vol  (released O assumed to stay as free O2)
+        and reduces to each of them in its own limit. Returns (P_boa, partial_pressures).
+        '''
+        # Start: previous solution if there is one, else the LavAtmos2 mole count
+        if self._P_boa_prev is not None:
+            P = self._P_boa_prev
+        else:
+            P = vapor_partial_pressures.sum(axis=1).iloc[0] + fO2 + self.P_volatile
+        if not (np.isfinite(P) and P > 0):
+            raise LavAtmosConvergenceError(f'Bad starting P_boa: {P}')
+ 
+        for _ in range(maxiter):
+            pp = self.calculate_partial_pressures_fastchem_loop(O_abun, T, [P],
+                                                                vapor_partial_pressures, volatile_comp)
+            self.phi_mix = self.read_phi_mix() #atoms per gas molecule from gastchem nags/ntot
+            if not (self.A_tot > 0):
+                raise LavAtmosConvergenceError(f'Non-positive atom inventory A_tot = {self.A_tot}')
+            P_new = self.A_tot / self.phi_mix
+            if abs(P_new - P) <= rtol * P:
+                self._P_boa_prev = P
+                return P, pp
+            P = P_new
+ 
+        raise LavAtmosConvergenceError(f'P_boa did not converge in {maxiter} iterations (last {P:.4e} bar)')
+
+    
+    def vaporise(self, T, P_volatile, melt_comp, volatile_comp , melt_fraction=1.0 , P_melt = 0.01,\
+                          fO2_initial_guess = 1e-10, fO2_tries_from_last=False, verbose=True, allow_unconverged = False,
+                          phi_env = None, logfO2_min = -45.0, logfO2_max = None,
+                          one_sided = False):
+
+        self._P_boa_prev = None
         self.P_volatile = P_volatile
 
 
@@ -180,145 +390,70 @@ class melt_vapor_system:
         #find initial O2 partial pressure before outgassing -> intheory we actually know this from calliope, so sould also use that output instead
         #not sure if this approach works - maybe I need to instead find the overall O-inventory
         if fO2_tries_from_last:
-            lb = np.log10(fO2_initial_guess/100)
-            ub = np.log10(fO2_initial_guess*100)
+            logfO2_min = np.log10(fO2_initial_guess / 1000)
+            logfO2_max = np.log10(fO2_initial_guess * 1000)
         else:
-            lb=self.fO2_interp_func(T[0]) - 4.0
-            ub=self.fO2_interp_func(T[0]) + 6.0
+            logfO2_min = -45
+            logfO2_max = 6
 
-        # tHis now computes mass balance with new abundances accounting for previously present oxygen
-        def mass_balance(logfO2):
-            fO2 = 10.0**logfO2
-            return self.mass_balance_equation_fastchem(fO2,T, volatile_comp,xatol=xatol)
+        if phi_env is None:
+            # any non-zero value works here: phi_env cancels in the normalisation of an
+            # envelope-only run (the old code used 0.0 at the first T -> all-zero abundances)
+            self.phi_env = 1.0
+            self.calculate_partial_pressures_fastchem_loop(0.0, T, [self.P_volatile],
+                                                                           vapor_partial_pressures=None,
+                                                                           volatile_comp=volatile_comp)
+            self.phi_env = self.read_phi_mix() #atoms per molecule - scales molecular pressure to atomic pressures
+        else:
+            self.phi_env = float(phi_env)
+            self._P_boa_prev = None
+         
+        def residual(logfO2, t=T):
+            '''function can only be evaluated if thepressure is not too high or to low for fastchem'''
+            try:
+                return self.mass_balance_equation_fastchem(None, 10.0**logfO2, T, volatile_comp)
+            except (ValueError, LavAtmosConvergenceError):
+                return np.nan
+                                                        
+         
+        
+        # start from the previous temperature's root if there is one, else the no-envelope fO2
+        x0 = np.log10(fO2_initial_guess) if fO2_tries_from_last else self.pure_melt_logfO2(T[0])
+        x0 = min(max(x0, logfO2_min), logfO2_max)       # start inside the allowed range
 
-        # fO2_initial_guess is PROTEUS's last-best fO2 for this run (only
-        # meaningful once fO2_tries_from_last is set, i.e. not the first
-        # iteration); warm-start the root solve from it, same as the inner
-        # O-abundance solve warm-starts from self._last_logO. When
-        # fO2_tries_from_last is set, [lb, ub] is already x0 +/- 2 decades,
-        # so the default window (2.0) would just repeat the same bracket
-        # the fallback tries anyway -- use a narrower window here so the
-        # warm start is actually a smaller, faster first attempt.
-        logfO2_x0 = np.log10(fO2_initial_guess) if fO2_tries_from_last else None
 
-        logfO2_best = self._solve_scalar_root(mass_balance, lb, ub, xatol,
-                                               x0=logfO2_x0, window=0.5,
-                                               label='outer fO2 solve')
-
-        fO2_best = 10**logfO2_best
-        log.debug(f'LavAtmos best fO2: {fO2_best:.2e} bar')
+        logfO2_best, info = self._solve_fO2_bracketed(residual, x0,
+                xmin=logfO2_min, xmax=logfO2_max,
+                allow_unconverged=allow_unconverged,
+                increasing=True if one_sided else None,
+                label=f'fO2 at T={T[0]:.0f} K')
+        
+        self._x0_prev = logfO2_best
+        log.debug(f'best fO2 {10**logfO2_best:.3e} | residual {info["residual"]:.2e} '
+                              f'| {info.get("n_eval", "?")} FastChem evaluations')  
 
         #subtract previouly available oxygen from oxygen that will be outgassed.
-        fO2_outgassed = fO2_best  #maybe better from mass balance
+        fO2_outgassed = 10**logfO2_best  #maybe better from mass balance
 
         vapor_partial_pressures = self.vapor_partial_pressure_calc(fO2_outgassed, T)
+        P_boa, pp = self.solve_P_boa(None, T, vapor_partial_pressures, volatile_comp, fO2_outgassed)
         P_outgassed = vapor_partial_pressures.sum(axis=1).iloc[0]+fO2_outgassed
-        P_boa = P_outgassed + self.P_volatile
-        partial_pressures = self.calculate_partial_pressures_fastchem_loop([self.O_abun],T,[P_boa],vapor_partial_pressures,volatile_comp,meltfrac=melt_fraction)
+        log.debug(f'P_boa {P_boa:.4e} bar | phi_mix {self.phi_mix:.4f} | phi_env {self.phi_env:.4f}')
+        
 
         # The vapour above was computed at fO2_best, so FastChem's O2 must match it. It
         # does not when the inner O-abundance solve fails, e.g. when a volatile oxygen
         # budget alone holds pO2 above fO2_best; the vapour is then out of equilibrium
         # with the gas it is mixed into.
-        pO2_gas = partial_pressures['O2'].iloc[0]
-        if abs(np.log10(pO2_gas / fO2_best)) > 0.01:
+        pO2_gas = pp['O2'].iloc[0]
+        if abs(np.log10(pO2_gas / fO2_outgassed)) > 0.01:
             log.warning(f'LavAtmos: FastChem pO2 ({pO2_gas:.3e} bar) differs from the solved '
-                        f'fO2 ({fO2_best:.3e} bar); melt-vapour equilibrium is not satisfied')
+                        f'fO2 ({fO2_outgassed:.3e} bar); melt-vapour equilibrium is not satisfied')
 
-        return partial_pressures
-
-
-
-    def get_massbalance_init(self,partial_pressures):
-
-        if not hasattr(melt_vapor_system, "mass_balance_eq"):
-            self.mass_balance_init=0.0
-
-        for gas in partial_pressures.columns:
-            contrib = 0
-            
-            for el in self.mass_law_contribution:
-
-                if el == gas:
-
-                    contrib += self.mass_law_contribution[el]
-
-                elif el in gas:
-
-                    index = gas.find(el)
-
-                    # Check if there's a coefficient present
-                    if index + len(el) < len(gas) and gas[index + len(el)].isdigit():
-                        stoi = float(gas[index + len(el)])
-                    
-                    # Ensures inclusion of sinle elements at end of species
-                    elif index + len(el) == len(gas):
-                        stoi = 1 
-
-                    # Avoid counting Si as S
-                    elif gas[index + len(el)].isupper():
-                        stoi = 1  # Default coefficient is 1
-            
-                    else: 
-                        stoi = 0
-
-                    contrib += self.mass_law_contribution[el]*stoi
-            self.mass_balance_init += contrib*partial_pressures[gas].iloc[0]
-
-        return self.mass_balance_init
-    
+        return pp
 
 
-    def _root_or_none(self, func, lb, ub, xtol):
-        '''
-        Attempt to find a root of func on [lb, ub] with Brent's method.
-        Returns None (instead of raising) if the interval does not
-        bracket a sign change.
-        '''
-        try:
-            return brentq(func, lb, ub, xtol=xtol)
-        except ValueError:
-            return None
 
-    def _solve_scalar_root(self, func, lb, ub, xatol, x0=None, window=2.0, label=''):
-        '''
-        Find x such that func(x) = 0 on [lb, ub].
-
-        The mass-balance/fO2-matching equations solved here are signed
-        residuals with (in the well-posed regime) a single sign change
-        in [lb, ub], so this is fundamentally a root-finding problem.
-        Previously it was solved by minimising abs(func(x)) with bounded
-        Brent minimisation; the abs() introduces a non-smooth kink right
-        at the root, which defeats Brent's parabolic-interpolation step
-        and degrades convergence to the much slower golden-section rate.
-        Solving for the root directly (brentq) needs far fewer function
-        evaluations for the same tolerance -- each evaluation here is an
-        external FastChem subprocess call, so this matters a lot.
-
-        If x0 is given (e.g. the O-abundance solution from a previous,
-        nearby fO2 trial), a tighter bracket around x0 is tried first as
-        a warm start. Falls back to the full [lb, ub] bracket, and
-        finally to the original bounded-minimisation-of-|func| behaviour
-        if no sign change can be found anywhere in [lb, ub], so the
-        result is always defined.
-        '''
-        if x0 is not None:
-            tlb, tub = max(lb, x0 - window), min(ub, x0 + window)
-            x = self._root_or_none(func, tlb, tub, xatol)
-            if x is not None:
-                log.debug(f'LavAtmos {label}: root found via warm-started brentq near {x0}: x={x}')
-                return x
-
-        x = self._root_or_none(func, lb, ub, xatol)
-        if x is not None:
-            log.debug(f'LavAtmos {label}: root found via brentq: x={x}')
-            return x
-
-        log.debug(f'LavAtmos {label}: bounds [{lb}, {ub}] do not bracket a root; '
-                  'falling back to bounded minimisation of |residual|.')
-        res = minimize_scalar(lambda z: abs(func(z)), bounds=(lb, ub),
-                               method='bounded', options={'xatol': xatol})
-        return res.x
 
     def mass_balance_equation_fastchem(self,fO2,T, volatile_comp,xatol=1e-6):
 
@@ -336,107 +471,16 @@ class melt_vapor_system:
             The result of the mass balance equation.    
         '''
         
-        if fO2 < 0:
-            return 1e20
-
-        # Partial pressures
-        # Calculate vaporisation partial pressures as first guess -> no info on volatile composition 
         vapor_partial_pressures = self.vapor_partial_pressure_calc(fO2, T)
-
-        P_outgassed = vapor_partial_pressures.sum(axis=1).iloc[0]+fO2
-        P_boa = [P_outgassed + self.P_volatile]
-        #self.inner_loop_output = 1e20
-
-        if 'O' in volatile_comp:
-            pp_init = self.calculate_partial_pressures_fastchem_loop([0.0],T,[self.P_volatile],vapor_partial_pressures=None,volatile_comp=volatile_comp,meltfrac=1.0)
-            self.mass_balance_init = self.get_massbalance_init(pp_init)
-            log.debug('LavAtmos initial mass balance:' + str(self.mass_balance_init))
-        else:
-            log.debug('LavAtmos no initial mass balance guess, no oxygen in atmosphere')
-
-        def objective(logO):
-            O_abun=10**logO
-            return self.inner_loop(O_abun, T, fO2, P_boa, vapor_partial_pressures, volatile_comp, meltfrac=1.0)
-
-        logO_sol = self._solve_scalar_root(objective, -12, 12, xatol,
-                                            x0=self._last_logO,
-                                            label='inner O_abun solve')
-        self._last_logO = logO_sol
-
-        self.O_abun = 10**logO_sol #thi sis now the extra O abundance that is required to reproduce the PO2 guessed
-        log.debug('Best O-abundances'+str(self.O_abun))
-        partial_pressures = self.calculate_partial_pressures_fastchem_loop(self.O_abun,T,P_boa,vapor_partial_pressures,volatile_comp,meltfrac=1.0)
-
-        # Calculate mass balance eq.
-        self.mass_balance_eq = 0
-        # mass_balance_eq += fO2_new
-
-        def el_stoichiometry(gas,el):
-            index = gas.find(el)
-            retgas[index+1]
-
-
-        for gas in partial_pressures.columns:
-            contrib = 0
-            
-            for el in self.mass_law_contribution:
-
-                if el == gas:
-
-
-                    contrib += self.mass_law_contribution[el]
-
-                elif el in gas:
-
-                    index = gas.find(el)
-
-                    # Check if there's a coefficient present
-                    if index + len(el) < len(gas) and gas[index + len(el)].isdigit():
-                        stoi = float(gas[index + len(el)])
-                    
-                    # Ensures inclusion of sinle elements at end of species
-                    elif index + len(el) == len(gas):
-                        stoi = 1 
-
-                    # Avoid counting Si as S
-                    elif gas[index + len(el)].isupper():
-                        stoi = 1  # Default coefficient is 1
-            
-                    else: 
-                        stoi = 0
-
-                    contrib += self.mass_law_contribution[el]*stoi
-
-            self.mass_balance_eq += contrib*partial_pressures[gas].iloc[0]
-
-        
-        log.debug(f'LavAtmos tried fO2: {fO2:.2e} bar')
-
-        if 'O' in volatile_comp:
-            self.total_mass_balance = self.mass_balance_init - self.mass_balance_eq
-            log.debug(f'LavAtmos mass balance eq with initial oxygen budget: {self.total_mass_balance:.2e}')
-            return self.total_mass_balance
-        else:
-            log.debug(f'LavAtmos mass balance eq: {self.mass_balance_eq:.2e}')
-            return self.mass_balance_eq
-
-
-
-
-    def inner_loop(self,O_abun,T,fO2,P_boa,vapor_partial_pressures,volatile_comp, meltfrac=1.0):
-
-        if O_abun < 0:
-            return 1e20
-
-        fastchem_partial_pressures = self.calculate_partial_pressures_fastchem_loop(O_abun,T,P_boa,vapor_partial_pressures, volatile_comp, meltfrac)
+         
+        # P_boa from the atom inventory instead of a mole count guessed before speciation
+        _, fastchem_partial_pressures = self.solve_P_boa(O_abun, T, vapor_partial_pressures, volatile_comp, fO2)
         fO2_output = fastchem_partial_pressures['O2'].iloc[0]
-        dfO2 = np.log10(fO2)-np.log10(fO2_output)
-        dfO2 = (fO2-fO2_output)/fO2
-        
-        self.inner_loop_output = dfO2
-        log.debug(f'LavAtmos fO2 residual: {self.inner_loop_output:+.2e}')
+        residual = np.log10(fO2) - np.log10(fO2_output)
+            
+        return residual
 
-        return dfO2
+
 
     def calculate_partial_pressures_fastchem_loop(self,O_abun,T,P_boa,vapor_partial_pressures, volatile_comp, meltfrac):
 
@@ -483,72 +527,89 @@ class melt_vapor_system:
                     elif (el) in spec:
                         frac[el] += mole_fractions[i].iloc[0]
 
-        #budget for O comes from interior and atmosphere not only atmosphere so need to cinser all sources for fastchem
-        for vol in volatile_comp.keys(): #these are CHNOPS
-            if P_boa==0:
-                    log.warning('Surface pressure of volatiles is zero !!!')
-                    frac[vol] = 0.0
-            else:
-                if vol == 'O':
-                    frac[vol] = self.P_volatile*volatile_comp[vol]/P_boa
-                    frac[vol] += O_abun
-                else:
-                    frac[vol] = self.P_volatile*volatile_comp[vol]/P_boa
+         # Melt-derived O: either given, or (O_abun=None) set by stoichiometry
+        if vapor_partial_pressures is not None and O_abun is None:
+            
+            O_stoich, O_vap = self.melt_O_budget_bar(vapor_partial_pressures)
+            O_abun = (O_stoich - O_vap) / P_boa
+            self.O_abun = O_abun
+ 
+        frac['O'] = frac.get('O', 0.0) + (O_abun or 0.0)
 
+        #budget for O comes from interior and atmosphere not only atmosphere so need to consider all sources for fastchem
+        for vol in volatile_comp.keys(): #these are CHNOPS
+            if P_boa==0: #[P_outgassed + self.P_volatile] This can happen before outgassing and if O in input element abundances but aboundace of O=0.0
+                print('surface pressure of volatiles is zero no volatile envelope present')
+                frac[vol] = 0.0
+            else:
+                contribution = self.P_volatile * self.phi_env * volatile_comp[vol] / P_boa
+ 
+                # Preserve any contribution already accumulated from vapor species.
+                frac[vol] = frac.get(vol, 0.0) + contribution
+ 
         '''
         Normalize elemental abundances
         '''
         fracN = {}
+        # print(frac.values())
         sum_fracs = sum(frac.values())
+        if not np.isfinite(sum_fracs):
+            raise LavAtmosConvergenceError(f'Non-finite elemental abundances passed to FastChem: {frac}')
+        # Total atom inventory in bar-equivalents. Every frac term is (atoms in bar)/P_boa,
+        # so this product does not depend on the P_boa that was passed in.
+        self.A_tot = sum_fracs * P_boa
+        # print(sum_fracs)
         for el in frac:
-            if sum_fracs> 0.0:
+            if sum_fracs > 0.0:
                 fracN[el] = frac[el]/sum_fracs
             else:
                 fracN[el]=0.0
-            if el in self.vaporised_elements:
-                fracN[el]= fracN[el] * np.float64(meltfrac) # account for decrease in abundance if meltfraction <1. 
-
+ 
         verbose = False
         if verbose:
-            log.info('Normalized fractional abundances:')
+            print('Normalized fractional abundances:')
             for el in fracN:
-                log.info(str(el)+': '+str(fracN[el]))
-
+                print(el)
+                print(fracN[el])
+ 
         # Open abundance file template
         # TODO: Consider not hardcoding this (moving to paths file)
-    
-
-        template = open(self.abundances_template, 'r')
+        template_name = 'element_abundances_template2.dat'
+        #template_name = 'element_abundances_noe-.dat'
+        output_name = self.elementfile
+        solar_abund_name = 'element_abundances_solar.dat'
+ 
+        template = open(self.abundances_location+template_name, 'r')
         elab_file = template.read()
         template.close()
-
-        #all refractory element abundances are wero if no outgassing yet
+ 
+        #all refractory element abundances are zero if no outgassing yet
         if vapor_partial_pressures is None:
             for el in self.vaporised_elements:
                 if el != 'O':
-                    fracN[el] = 0
-
+                    fracN[el] = 0.0
+ 
     
         # Set abundances to outgassed abundances
         for el in self.all_elements:
             if el in self.vaporised_elements and fracN[el] != 0 or el in volatile_comp and fracN[el] != 0:
                 abund = 12 + np.log10(fracN[el]*1e20)
-
+ 
                 if self.is_iterable(abund):
                     abund = abund[0]
                 
                 elab_file = elab_file.replace(f'<<{el}>>', str(abund))
             else:
-                # abund = self.solar_abundance[el]
                 abund = 0
                 elab_file = elab_file.replace(f'<<{el}>>', str(abund))
         
         # Save abundance file
-        self.abundance_fname = self.elementfile
+        self.abundance_fname = self.abundances_location + output_name
+        
         g = open(self.abundance_fname, 'w')
         g.write(elab_file)
         g.close()
-
+ 
         return P_boa
 
     def vapor_partial_pressure_calc(self, fO2, T):
